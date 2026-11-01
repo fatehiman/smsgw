@@ -1,0 +1,78 @@
+'use strict';
+// Pure unit tests, no database needed:  npm test
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://x:x@127.0.0.1:1/x';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const { windowStart, effectiveLimits } = require('../src/ratelimit');
+const { pickProvider, effectiveDefault } = require('../src/sms');
+const { hashPassword, verifyPassword, normalizePhone } = require('../src/util');
+const { isPrivateIp, checkUrlSyntax } = require('../src/webhooks');
+const { fill } = require('../src/providers/_http');
+const providers = require('../src/providers');
+
+test('day window resets at local midnight (Tehran +3:30)', () => {
+  // 2026-11-01T20:29:59Z is 23:59:59 in Tehran -> window began 2026-11-01 00:00 Tehran = 2026-10-31T20:30:00Z
+  const now = Date.UTC(2026, 10, 1, 20, 29, 59) / 1000;
+  assert.equal(windowStart(now, 86400, 210), Date.UTC(2026, 9, 31, 20, 30, 0) / 1000);
+  // one second later it is 00:00:00 -> new window
+  assert.equal(windowStart(now + 1, 86400, 210), Date.UTC(2026, 10, 1, 20, 30, 0) / 1000);
+});
+
+test('minute and hour windows are aligned', () => {
+  const now = Date.UTC(2026, 10, 1, 10, 15, 42) / 1000;
+  assert.equal(windowStart(now, 60, 210), Date.UTC(2026, 10, 1, 10, 15, 0) / 1000);
+  assert.equal(windowStart(now, 3600, 0), Date.UTC(2026, 10, 1, 10, 0, 0) / 1000);
+});
+
+test('token limits override defaults, null falls back, 0 is unlimited', () => {
+  const d = { minute: 20, hour: 100, day: 300 };
+  assert.deepEqual(effectiveLimits({ limit_minute: null, limit_hour: 5, limit_day: 0 }, d), { m: 20, h: 5, d: 0 });
+});
+
+const P = (id, slug) => ({ id, slug });
+test('default provider rules', () => {
+  const a = P(1, 'a'); const b = P(2, 'b'); const c = P(3, 'c');
+  assert.equal(effectiveDefault({ default_provider_id: 3 }, [a, b, c], 1).slug, 'c'); // token default wins
+  assert.equal(effectiveDefault({ default_provider_id: null }, [a, b, c], 2).slug, 'b'); // global default
+  assert.equal(effectiveDefault({ default_provider_id: null }, [b, c], 1).slug, 'b'); // global not allowed -> first
+  assert.equal(effectiveDefault({ default_provider_id: 9 }, [b, c], null).slug, 'b'); // stale default -> first
+  assert.equal(effectiveDefault({}, [], 1), null);
+});
+
+test('explicit provider must be allowed', () => {
+  assert.equal(pickProvider({}, [P(1, 'a')], null, 'a').slug, 'a');
+  assert.throws(() => pickProvider({}, [P(1, 'a')], null, 'zzz'), { code: 'provider_not_allowed' });
+  assert.throws(() => pickProvider({}, [], null, undefined), { code: 'no_provider' });
+});
+
+test('password hash round trip', () => {
+  const h = hashPassword('s3cret');
+  assert.ok(verifyPassword('s3cret', h));
+  assert.ok(!verifyPassword('wrong', h));
+  assert.ok(!verifyPassword('x', ''));
+});
+
+test('phone numbers', () => {
+  assert.equal(normalizePhone('+98 912-123 4567'), '+989121234567');
+  assert.equal(normalizePhone('abc'), null);
+});
+
+test('webhook url guards', () => {
+  assert.ok(isPrivateIp('127.0.0.1') && isPrivateIp('10.1.2.3') && isPrivateIp('192.168.0.9') && isPrivateIp('::1'));
+  assert.ok(!isPrivateIp('8.8.8.8'));
+  assert.ok(checkUrlSyntax('ftp://x.com'));
+  assert.ok(checkUrlSyntax('https://u:p@x.com'));
+  assert.equal(checkUrlSyntax('https://x.com/hook'), null);
+});
+
+test('template placeholders are escaped for the body format', () => {
+  assert.equal(fill('{"t":"{{text}}"}', { text: 'say "hi"\n' }, 'json'), '{"t":"say \\"hi\\"\\n"}');
+  assert.equal(fill('to={{to}}', { to: '+98 9' }, 'url'), 'to=%2B98%209');
+  assert.equal(fill('{{params.code}}', { params: { code: '12' } }), '12');
+});
+
+test('all drivers load and have a valid type', () => {
+  const names = providers.list().map((d) => d.driver).sort();
+  assert.deepEqual(names, ['generic-http', 'generic-http-template', 'kavenegar-lookup', 'mock-template', 'mock-text']);
+});

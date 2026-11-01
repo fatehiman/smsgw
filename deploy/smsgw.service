@@ -1,0 +1,23 @@
+[Unit]
+Description=SMS Gateway (smsgw.kimiasoft.ir)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/smsgw
+EnvironmentFile=/etc/smsgw.env
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first --no-network-family-autoselection
+ExecStart=/usr/local/bin/node src/server.js
+Restart=always
+RestartSec=3
+MemoryMax=300M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
