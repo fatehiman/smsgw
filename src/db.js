@@ -131,6 +131,26 @@ const MIGRATIONS = [
 
    INSERT INTO settings (key, value) VALUES
      ('limit_minute', '20'), ('limit_hour', '100'), ('limit_day', '300'), ('tz_offset_min', '210');`,
+  // 2: SMS opt-out (src/blacklist.js): the list (last 10 digits) and its log (kept 1 year)
+  `CREATE TABLE blacklist (
+     phone text PRIMARY KEY,
+     number text NOT NULL,
+     provider_id int REFERENCES providers(id) ON DELETE SET NULL,
+     line text,
+     message_id bigint,
+     since timestamptz NOT NULL DEFAULT now()
+   );
+   CREATE TABLE blacklist_log (
+     id bigserial PRIMARY KEY,
+     phone text NOT NULL,
+     number text NOT NULL,
+     action text NOT NULL CHECK (action IN ('add','remove')),
+     provider_id int REFERENCES providers(id) ON DELETE SET NULL,
+     line text,
+     message_id bigint,
+     at timestamptz NOT NULL DEFAULT now()
+   );
+   CREATE INDEX blacklist_log_at_idx ON blacklist_log (at);`,
 ];
 
 async function migrate() {

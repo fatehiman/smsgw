@@ -9,6 +9,7 @@ const admin = require('./admin');
 const inbound = require('./inbound');
 const webhooks = require('./webhooks');
 const ratelimit = require('./ratelimit');
+const blacklist = require('./blacklist');
 const { ApiError } = require('./util');
 
 const indexHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'));
@@ -61,6 +62,7 @@ async function main() {
   every(60000, inbound.pollAll);
   every(3600000, ratelimit.cleanup);
   every(3600000, webhooks.cleanup);
+  every(3600000, blacklist.cleanup);
   server.listen(config.port, config.host, () => console.log(`smsgw listening on ${config.host}:${config.port}`));
 }
 

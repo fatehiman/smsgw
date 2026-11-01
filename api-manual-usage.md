@@ -90,6 +90,10 @@ Add `"reference":"order-1234"`. It comes back in the result and in status checks
 
 Message status: `queued` → `sent` → `delivered` (only if the provider tells us) or `failed`.
 
+**Footer and opt-out (fixed rules).** The gateway adds a line break and `لغو11` to the end of every **text** SMS. If the
+person answers `11`, the number goes on a blacklist and every later send to it (from any key) fails with HTTP `403`
+`number_blacklisted` until the person sends `12`. Do not retry such a number.
+
 ## 5. Check a message later
 
 ```bash
@@ -209,6 +213,7 @@ Errors look like this:
 | `text_not_supported` (422) | You sent `text` to a template provider. Send `template` + `params`. |
 | `template_required`, `template_not_found` (422) | Use a template from `GET /providers`. |
 | `params_invalid` (422) | `details` lists `expected`, `missing`, `unknown` parameter names. |
+| `number_blacklisted` (403) | The recipient sent `11` (opt-out). Do not retry; it works again only after they send `12`. |
 | `rate_limited` (429) | Wait `Retry-After` seconds. |
 | `provider_error`, `provider_rejected`, `network_error` (502) | The provider failed (for example no credit). The message is saved as `failed`; see `details.message`. |
 

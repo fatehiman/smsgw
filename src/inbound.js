@@ -5,6 +5,7 @@ const { q } = require('./db');
 const providers = require('./providers');
 const sms = require('./sms');
 const webhooks = require('./webhooks');
+const blacklist = require('./blacklist');
 const { ApiError, readBody, parseBody, safeEqual, digitsTail } = require('./util');
 
 // Which API token owns an incoming SMS?
@@ -34,6 +35,19 @@ async function storeEvents(provider, events) {
   let stored = 0;
   for (const ev of events) {
     if (ev.kind === 'sms') {
+      // 11 / 12 are commands to the gateway (blacklist), not messages for a project: kept in the log
+      // (Messages) with no key, so no key's inbox or webhook ever sees them
+      const cmd = blacklist.parseCommand(ev.text);
+      if (cmd) {
+        const cmdRow = (await q(
+          `INSERT INTO messages (token_id, provider_id, direction, peer, line, body, status, provider_message_id, read_at)
+           VALUES (NULL,$1,'in',$2,$3,$4,'received',$5, now()) RETURNING id`,
+          [provider.id, ev.from, ev.to ?? null, ev.text, ev.providerMessageId ?? null],
+        )).rows[0];
+        await blacklist.apply(cmd, ev.from, { providerId: provider.id, line: ev.to ?? null, messageId: cmdRow.id });
+        stored++;
+        continue;
+      }
       const tokenId = await attribute(provider, ev.from, ev.to);
       const row = (await q(
         `INSERT INTO messages (token_id, provider_id, direction, peer, line, body, status, provider_message_id)

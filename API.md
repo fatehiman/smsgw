@@ -87,6 +87,7 @@ Status: `queued` → `sent` → `delivered` (if the provider reports it) or `fai
 | 422 | `text_not_supported` | You sent `text` to a **template** provider |
 | 422 | `template_required`, `template_not_found` | Template provider needs a known `template` (`details.templates` lists them) |
 | 422 | `params_invalid` | `details.expected`, `missing`, `unknown` |
+| 403 | `number_blacklisted` | The recipient sent `11` (opt-out): nothing is sent to it, from any key, until it sends `12`. The message is saved as `failed` (`details.message`) |
 | 429 | `rate_limited` | See Rate limits |
 | 502 | `provider_error`, `provider_rejected`, `network_error` | The provider failed. The message is saved as `failed` and returned in `details.message` |
 

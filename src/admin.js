@@ -5,6 +5,7 @@ const config = require('./config');
 const providers = require('./providers');
 const settings = require('./settings');
 const webhooks = require('./webhooks');
+const blacklist = require('./blacklist');
 const ui = require('./admin-ui');
 const {
   ApiError, sha256, hmac, randomToken, randomHex, safeEqual, verifyPassword, readBody, parseBody,
@@ -531,6 +532,30 @@ route('GET', /^\/mainadmin\/messages$/, async (ctx) => {
     ${sel('dir', sp.get('dir'), [['out', 'sent'], ['in', 'received']])}${sel('token', sp.get('token'), tokens.map((t) => [t.id, t.name]))}
     ${sel('status', sp.get('status'), ['queued', 'sent', 'delivered', 'failed', 'received'].map((s) => [s, s]))}
     <button class="btn txt-btn" style="margin:0" type="submit">Filter</button></form><div class="card">${messageTable(rows)}</div>${next}`, 'messages');
+});
+
+// --- blacklist (read only: the rules are fixed, src/blacklist.js)
+route('GET', /^\/mainadmin\/blacklist$/, async (ctx) => {
+  const find = String(ctx.url.searchParams.get('q') || '').replace(/\D/g, '').slice(-10);
+  const like = find ? `%${find}%` : '%';
+  const list = (await q(`SELECT b.*, p.slug AS provider_slug FROM blacklist b LEFT JOIN providers p ON p.id=b.provider_id
+                         WHERE b.phone LIKE $1 ORDER BY b.since DESC LIMIT 300`, [like])).rows;
+  const log = (await q(`SELECT l.*, p.slug AS provider_slug FROM blacklist_log l LEFT JOIN providers p ON p.id=l.provider_id
+                        WHERE l.phone LIKE $1 ORDER BY l.id DESC LIMIT 200`, [like])).rows;
+  const total = (await q('SELECT count(*)::int AS n FROM blacklist')).rows[0].n;
+  const rows = list.map((b) => `<tr><td class="mono">${esc(b.number)}</td><td class="muted">${fmtTime(b.since)}</td>
+    <td class="mono">${esc(b.line || '—')}</td><td class="mono">${esc(b.provider_slug || '—')}</td></tr>`).join('');
+  const logRows = log.map((l) => `<tr><td class="muted">${l.id}</td><td class="muted">${fmtTime(l.at)}</td><td class="mono">${esc(l.number)}</td>
+    <td>${badge(l.action === 'add' ? 'sent 11 - blocked' : 'sent 12 - allowed again', l.action === 'add' ? 'bad' : 'ok')}</td>
+    <td class="mono">${esc(l.line || '—')}</td></tr>`).join('');
+  return page(ctx, 'Blacklist', `<h1>Blacklist</h1>
+    <div class="card"><p class="help">Fixed rules: every text SMS ends with «${esc(blacklist.FOOTER)}» after a line break. A number that sends <b>11</b> gets no SMS from any
+    key until it sends <b>12</b> (the API answers <span class="mono">number_blacklisted</span>, 403). This list cannot be edited here. Log rows are deleted after
+    ${blacklist.LOG_KEEP_DAYS} days.</p>
+    <form method="get" style="display:flex;gap:8px;align-items:center"><input name="q" value="${esc(find)}" placeholder="part of a number" style="width:auto">
+    <button class="btn txt-btn" style="margin:0" type="submit">Search</button></form></div>
+    <div class="card"><h3>Blocked numbers (${total})</h3><table><tr><th>Number</th><th>Since (UTC)</th><th>Line</th><th>Provider</th></tr>${rows || '<tr><td colspan="4" class="muted">No blocked numbers.</td></tr>'}</table></div>
+    <div class="card"><h3>Log (11 and 12)</h3><table><tr><th>#</th><th>Time (UTC)</th><th>Number</th><th>What</th><th>Line</th></tr>${logRows || '<tr><td colspan="5" class="muted">Empty.</td></tr>'}</table></div>`, 'blacklist');
 });
 
 // ---------- dispatcher ----------

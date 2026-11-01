@@ -29,6 +29,25 @@ Docs: [API.md](API.md) (for callers) · [DEPLOY.md](DEPLOY.md) (server) · this 
   **rotate**, turn off, delete, manage **webhooks**. A token is shown **once**; only its SHA-256 hash is stored.
 - **Rate limits**: global defaults and the time zone offset that decides when "00:00" is.
 - **Messages**: log of sent and received SMS.
+- **Blacklist**: numbers that sent `11` (no SMS goes to them until `12`) and the log of 11 / 12. See below.
+
+## Opt-out and the blacklist (fixed rules, since 2026-11-01)
+
+These rules are written in the code (`src/blacklist.js`) and cannot be changed in the admin panel or per key.
+
+- **Footer.** Every **text** SMS ends with a line break and `لغو11`. The gateway adds it (once); the stored message and
+  the delivered SMS contain it. Template providers cannot get a footer (the provider owns the template text): the
+  footer must be inside the template itself. Today only the text provider `mihan` exists.
+- **11 = stop.** An incoming SMS whose text is `11` (also `۱۱`, or the footer `لغو11` typed back) puts the sender
+  on the **blacklist**. The message is kept in the Messages log but belongs to **no key**: no inbox and no webhook of any
+  project ever sees it (so it can never be taken for "I paid").
+- **Blocked means blocked.** A send to a listed number, from any key and any project, is **refused**: HTTP `403`,
+  error code `number_blacklisted`, and the message is saved as `failed`. The list uses the last 10 digits
+  (`09121234567` = `+989121234567`).
+- **12 = start again.** An incoming SMS `12` removes the sender from the list.
+- **Logs.** Every `11` and `12` is written to `blacklist_log`; a log row is deleted after **1 year** (hourly job).
+  The list itself stays until the number sends `12`.
+- **Admin page: Blacklist** (`/mainadmin/blacklist`): blocked numbers, the 11 / 12 log, search by number. Read only.
 
 ## Rules worth knowing
 

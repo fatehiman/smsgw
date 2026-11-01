@@ -2,6 +2,7 @@
 const { q } = require('./db');
 const providers = require('./providers');
 const webhooks = require('./webhooks');
+const blacklist = require('./blacklist');
 const { ApiError, normalizePhone } = require('./util');
 
 const MAX_TEXT = 2000;
@@ -56,7 +57,8 @@ async function buildMessage(provider, driver, body) {
       throw new ApiError(422, 'text_required', `Provider "${provider.slug}" needs a non-empty "text".`, info);
     }
     if (body.text.length > MAX_TEXT) throw new ApiError(422, 'text_too_long', `"text" is longer than ${MAX_TEXT} characters`, info);
-    return { to, text: body.text, template: null, params: null, paramList: [] };
+    // every text SMS ends with «لغو11» after a line break (src/blacklist.js, fixed rule)
+    return { to, text: blacklist.withFooter(body.text), template: null, params: null, paramList: [] };
   }
 
   // template provider
@@ -107,6 +109,19 @@ async function sendSms(token, body) {
   if (!driver) throw new ApiError(503, 'provider_unavailable', `Driver for provider "${provider.slug}" is not installed`);
 
   const msg = await buildMessage(provider, driver, body);
+  // a number that sent 11 gets nothing, from any key, until it sends 12 (fixed rule)
+  const listed = await blacklist.find(msg.to);
+  if (listed) {
+    const why = 'number_blacklisted: the recipient sent 11 (opt-out) and is on the blacklist; no SMS can be sent to it until it sends 12';
+    const failed = (await q(
+      `INSERT INTO messages (token_id, provider_id, direction, peer, body, template_code, params, status, error, reference)
+       VALUES ($1,$2,'out',$3,$4,$5,$6,'failed',$7,$8) RETURNING id`,
+      [token.id, provider.id, msg.to, msg.text, msg.template, msg.params, why, reference],
+    )).rows[0];
+    throw new ApiError(403, 'number_blacklisted',
+      `This number is in the blacklist (the recipient sent 11 to stop SMS) since ${listed.since.toISOString()}. No SMS is sent until it sends 12.`,
+      { message: await getMessage(token.id, failed.id), since: listed.since });
+  }
   const row = (await q(
     `INSERT INTO messages (token_id, provider_id, direction, peer, body, template_code, params, status, reference)
      VALUES ($1,$2,'out',$3,$4,$5,$6,'queued',$7) RETURNING id`,

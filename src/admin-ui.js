@@ -84,7 +84,7 @@ select:has(option[value=""]:checked){color:var(--ph)}select option{color:initial
 function layout(title, body, { nav = '', csrf = '' } = {}) {
   const link = (k, href, label) => `<a href="${href}" class="${nav === k ? 'on' : ''}">${label}</a>`;
   const bar = csrf
-    ? `<header><b>SMS Gateway</b><nav>${link('home', '/mainadmin', 'Dashboard')}${link('providers', '/mainadmin/providers', 'Providers')}${link('tokens', '/mainadmin/tokens', 'API tokens')}${link('limits', '/mainadmin/limits', 'Rate limits')}${link('messages', '/mainadmin/messages', 'Messages')}</nav>${postBtn('/mainadmin/logout', csrf, 'logout', 'Log out', 'gray')}</header>`
+    ? `<header><b>SMS Gateway</b><nav>${link('home', '/mainadmin', 'Dashboard')}${link('providers', '/mainadmin/providers', 'Providers')}${link('tokens', '/mainadmin/tokens', 'API tokens')}${link('limits', '/mainadmin/limits', 'Rate limits')}${link('messages', '/mainadmin/messages', 'Messages')}${link('blacklist', '/mainadmin/blacklist', 'Blacklist')}</nav>${postBtn('/mainadmin/logout', csrf, 'logout', 'Log out', 'gray')}</header>`
     : '';
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${esc(title)} · SMS Gateway</title><style>${CSS}</style></head><body>${bar}${body}</body></html>`;
 }
