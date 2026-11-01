@@ -6,7 +6,7 @@ Server notes: `E:\www\myLan\waybill7.md`. Passwords: `credentials.md` (git-ignor
 | Thing | Value |
 |---|---|
 | Code | `/var/www/smsgw` (root-owned, read-only for the service) |
-| Unit | `smsgw.service` (`www-data`, `127.0.0.1:25464`, `MemoryMax=300M`) |
+| Unit | `smsgw.service` (`www-data`, `127.0.0.1:25465`, `MemoryMax=300M`) |
 | Settings | `/etc/smsgw.env` (`640 root:www-data`): `DATABASE_URL`, `ADMIN_PASS_HASH`, `SESSION_SECRET` |
 | DB | PostgreSQL 17 (shared server, `127.0.0.1`), database + role `smsgw` |
 | Vhost | `/etc/apache2/sites-available/smsgw.kimiasoft.ir.conf` (`:80` + `:443`, self-signed origin cert) |
@@ -47,4 +47,4 @@ ssh waybill7 "journalctl -u smsgw -n 30 --no-pager"
   not an Arvan address.
 - Rollback: `tar xzf /root/smsgw-code-<time>.tgz -C /var/www/smsgw` (after `rm -rf` of the folder contents) and `systemctl restart smsgw`.
   DB restore: `gunzip -c /var/backups/smsgw/<file> | runuser -u postgres -- psql smsgw`.
-- Next free app port on waybill7 after this: `25465`.
+- Next free app port on waybill7 after this: `25466` (`25464` is used by brainymemo-telegram, not free as the old notes said).

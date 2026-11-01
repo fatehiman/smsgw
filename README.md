@@ -120,7 +120,7 @@ npm install
 npm test                 # unit tests
 npm start                # migrations run at start
 # e2e on an EMPTY throwaway database, gateway started with ALLOW_PRIVATE_WEBHOOKS=1:
-BASE=http://127.0.0.1:25464 ADMIN_PASS=... node test/smoke.js
+BASE=http://127.0.0.1:25465 ADMIN_PASS=... node test/smoke.js
 ```
 
 `credentials.md` (git-ignored) holds the real passwords. The `reference-docs/` folder is for non-code files and is never deployed.

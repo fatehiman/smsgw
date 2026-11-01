@@ -14,7 +14,7 @@ if (fs.existsSync(envFile)) {
 const env = process.env;
 
 module.exports = {
-  port: Number(env.PORT) || 25464,
+  port: Number(env.PORT) || 25465,
   host: env.HOST || '127.0.0.1',
   databaseUrl: env.DATABASE_URL || '',
   adminUser: env.ADMIN_USER || 'mainadmin',

@@ -1,11 +1,11 @@
 'use strict';
 // End-to-end smoke test against a RUNNING gateway with an EMPTY database (use a throwaway DB!).
-//   BASE=http://127.0.0.1:25464 ADMIN_USER=mainadmin ADMIN_PASS=... node test/smoke.js
+//   BASE=http://127.0.0.1:25465 ADMIN_USER=mainadmin ADMIN_PASS=... node test/smoke.js
 // Start the gateway with ALLOW_PRIVATE_WEBHOOKS=1 so the test can receive webhooks on localhost.
 const http = require('http');
 const assert = require('node:assert/strict');
 
-const BASE = process.env.BASE || 'http://127.0.0.1:25464';
+const BASE = process.env.BASE || 'http://127.0.0.1:25465';
 const USER = process.env.ADMIN_USER || 'mainadmin';
 const PASS = process.env.ADMIN_PASS;
 if (!PASS) { console.error('Set ADMIN_PASS'); process.exit(1); }
