@@ -74,5 +74,20 @@ test('template placeholders are escaped for the body format', () => {
 
 test('all drivers load and have a valid type', () => {
   const names = providers.list().map((d) => d.driver).sort();
-  assert.deepEqual(names, ['generic-http', 'generic-http-template', 'kavenegar-lookup', 'mock-template', 'mock-text']);
+  assert.deepEqual(names, ['generic-http', 'generic-http-template', 'kavenegar-lookup', 'mihan-sms', 'mock-template', 'mock-text']);
+});
+
+test('mihan: SOAP envelope, field parsing, number format', () => {
+  const m = require('../src/providers/mihan-sms')._internal;
+  const env = m.envelope('send', { to: '0912', message: 'a<b & "c"', check_duplicate: false });
+  assert.ok(env.includes('<message xsi:type="xsd:string">a&lt;b &amp; "c"</message>'));
+  assert.ok(env.includes('<check_duplicate xsi:type="xsd:boolean">false</check_duplicate>'));
+  const reply = '<ns1:sendResponse><status xsi:type="xsd:int">0</status><identifier xsi:type="xsd:int">77</identifier><status_message xsi:type="xsd:string">x &amp; y</status_message></ns1:sendResponse>';
+  assert.equal(m.field(reply, 'identifier'), '77');
+  assert.equal(m.field(reply, 'status_message'), 'x & y');
+  const list = '<messages xsi:type="SOAP-ENC:Array"><item xsi:type="ns1:message"><messageId>5</messageId><to>3000</to><from>0912</from><message>hi</message><timestamp>1</timestamp></item></messages>';
+  assert.deepEqual(m.parseMessages(list), [{ messageId: '5', to: '3000', from: '0912', message: 'hi', timestamp: '1' }]);
+  assert.equal(m.localNumber('+989121234567'), '09121234567');
+  assert.equal(m.localNumber('9121234567'), '09121234567');
+  assert.equal(m.localNumber('+441234567890'), '+441234567890');
 });

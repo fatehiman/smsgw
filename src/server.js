@@ -28,7 +28,7 @@ function send(res, status, body = '', headers = {}) {
     'Content-Type': 'text/plain; charset=utf-8',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
-    'Referrer-Policy': 'no-referrer',
+    'Referrer-Policy': 'same-origin',
     ...headers,
   });
   res.end(body);

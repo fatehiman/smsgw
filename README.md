@@ -109,7 +109,7 @@ module.exports = {
 ```
 
 Included drivers: `generic-http` (text) and `generic-http-template` (template) — connect most simple HTTP SMS APIs
-from the admin panel with URL/body templates, no code; `kavenegar-lookup` (template); `mock-text` and
+from the admin panel with URL/body templates, no code; `kavenegar-lookup` (template); `mihan-sms` (MihanSMSCenter, text, SOAP; send, receive by push or pull); `mock-text` and
 `mock-template` (send nothing; for testing). Files starting with `_` in `src/providers/` are shared helpers.
 
 ## Development

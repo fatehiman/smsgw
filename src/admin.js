@@ -540,8 +540,13 @@ async function handle(req, res, url, ip, send) {
   try {
     if (!config.sessionSecret || !config.adminPassHash) return send(503, 'Admin is not configured', { 'Content-Type': 'text/plain' });
     if (req.method === 'POST') {
+      // "Origin: null" is sent by browsers for privacy-restricted pages; SameSite=Strict + the CSRF token cover that case.
       const origin = req.headers.origin;
-      if (origin && new URL(origin).host !== req.headers.host) return send(403, 'Forbidden', { 'Content-Type': 'text/plain' });
+      let foreign = false;
+      if (origin && origin !== 'null') {
+        try { foreign = new URL(origin).host !== req.headers.host; } catch { foreign = true; }
+      }
+      if (foreign) return send(403, 'Forbidden', { 'Content-Type': 'text/plain' });
     }
     const s = readSession(req);
     const body = req.method === 'POST' ? parseBody(await readBody(req), req.headers['content-type']) : {};
