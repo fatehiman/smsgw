@@ -3,6 +3,7 @@ const { Pool, types } = require('pg');
 const config = require('./config');
 
 types.setTypeParser(20, Number); // bigint -> number (ids and counters stay small)
+types.setTypeParser(1700, Number); // numeric -> number (money, 2 decimals)
 
 const pool = new Pool({ connectionString: config.databaseUrl, max: 8, idleTimeoutMillis: 30000 });
 pool.on('error', (e) => console.error('pg pool error:', e.message));
@@ -151,6 +152,24 @@ const MIGRATIONS = [
      at timestamptz NOT NULL DEFAULT now()
    );
    CREATE INDEX blacklist_log_at_idx ON blacklist_log (at);`,
+  // 3: billing (src/billing.js): price per part per key + provider, balance, allowed debt, transactions
+  `ALTER TABLE token_providers ADD COLUMN price numeric(12,2) CHECK (price >= 0);
+   ALTER TABLE api_tokens ADD COLUMN balance numeric(14,2) NOT NULL DEFAULT 0,
+     ADD COLUMN credit_limit numeric(14,2) NOT NULL DEFAULT 0 CHECK (credit_limit >= 0);
+   ALTER TABLE messages ADD COLUMN parts int, ADD COLUMN cost numeric(12,2);
+   CREATE TABLE transactions (
+     id bigserial PRIMARY KEY,
+     token_id int NOT NULL REFERENCES api_tokens(id) ON DELETE CASCADE,
+     kind text NOT NULL CHECK (kind IN ('payment','adjust','sms')),
+     amount numeric(14,2) NOT NULL,
+     message_id bigint,
+     parts int,
+     unit_price numeric(12,2),
+     note text NOT NULL DEFAULT '',
+     created_at timestamptz NOT NULL DEFAULT now()
+   );
+   CREATE INDEX transactions_token_idx ON transactions (token_id, id);
+   CREATE UNIQUE INDEX transactions_message_idx ON transactions (message_id) WHERE message_id IS NOT NULL;`,
 ];
 
 async function migrate() {

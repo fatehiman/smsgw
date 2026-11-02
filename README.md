@@ -5,6 +5,7 @@ An API gateway to **send and receive SMS** through any provider. Live at `https:
 - One admin (`/mainadmin`), many **API tokens** (one per project).
 - Provider-agnostic: a new provider is a new folder of files.
 - Two provider types: **text** (any SMS text) and **template** (template ID + parameters).
+- **Billing**: price per SMS part per token and provider, a balance and an allowed debt per token, payments as transactions.
 - Per-token, per-caller-IP **rate limits** (default 20/min, 100/hour, 300/day, fixed windows).
 - Receive SMS by **webhook** (we call you) or by **polling** an API endpoint.
 - Node.js 22+ (runs on 24), PostgreSQL, one npm package (`pg`). No framework.
@@ -25,8 +26,9 @@ Docs: [API.md](API.md) (for callers) · [DEPLOY.md](DEPLOY.md) (server) · this 
 
 - **Providers**: add an instance of a driver, edit its settings, enable/disable, choose the **global default**.
   Template providers also have a **Templates** table (template ID, name, parameter names). There is no API for templates.
-- **API tokens**: create (name, allowed providers, default provider, incoming numbers, optional own limits),
-  **rotate**, turn off, delete, manage **webhooks**. A token is shown **once**; only its SHA-256 hash is stored.
+- **API tokens**: create (name, allowed providers with a **price per SMS part** each, default provider, **allowed debt**,
+  incoming numbers, optional own limits), **rotate**, turn off, delete, manage **webhooks**. The token page has
+  **Balance and payments**: the balance, a form to save a payment or a correction, and all transactions. A token is shown **once**; only its SHA-256 hash is stored.
 - **Rate limits**: global defaults and the time zone offset that decides when "00:00" is.
 - **Messages**: log of sent and received SMS.
 - **Blacklist**: numbers that sent `11` (no SMS goes to them until `12`) and the log of 11 / 12. See below.
@@ -48,6 +50,26 @@ These rules are written in the code (`src/blacklist.js`) and cannot be changed i
 - **Logs.** Every `11` and `12` is written to `blacklist_log`; a log row is deleted after **1 year** (hourly job).
   The list itself stays until the number sends `12`.
 - **Admin page: Blacklist** (`/mainadmin/blacklist`): blocked numbers, the 11 / 12 log, search by number. Read only.
+
+## Billing (since 2026-11-02)
+
+Code: `src/billing.js`. Money is in Toman (`IRT`), 2 decimals.
+
+- **Price** of one SMS **part**, per token **and** provider (`token_providers.price`). Empty = that provider is free for
+  that token: no charge and no balance check. So old tokens keep working until a price is set. `0` = free, but a token
+  below its debt limit is still blocked.
+- **Parts.** GSM-7 text: 160 / 153 per part. Anything else (Persian): 70 / 67 per part (UTF-16 units). The footer is
+  counted, so every text SMS is UCS-2. Template SMS: the template's saved text ("Preview text" in the admin) with the
+  values put in (`{{name}}`, `{name}` or `%name`); no saved text = 1 part.
+- **Balance and allowed debt** on the token (`api_tokens.balance`, `credit_limit`, a positive number). A send is refused
+  with `402 insufficient_balance` when `balance - cost < -credit_limit`. The message is saved as `failed`.
+- **When we charge.** The cost is taken (one atomic `UPDATE`) before the provider call. If the provider throws, the money
+  goes back and the `sms` transaction row is removed. So we charge only what the provider accepted. A later `failed`
+  delivery report gives nothing back (the provider charges us anyway).
+- **Transactions** (`transactions` table): `payment` (admin, > 0), `adjust` (admin, + or −, note required), `sms` (charge).
+  They cannot be edited or deleted. `balance = SUM(amount)` is always true; "balance after" is a running sum.
+  Deleting a token deletes its transactions too.
+- API: `GET /balance`, `GET /transactions`, and `parts` / `cost` on every sent message. Admin → Messages shows them too.
 
 ## Rules worth knowing
 
@@ -82,6 +104,7 @@ src/server.js          HTTP server, routing, background loops
 src/api.js             public API routes
 src/admin.js           admin panel (+ admin-ui.js: HTML/CSS helpers)
 src/sms.js             provider choice + type validation + sending
+src/billing.js         SMS parts, prices, balance, transactions
 src/inbound.js         /hook endpoint, who-owns-this-SMS logic, polling
 src/webhooks.js        webhook queue, signing, retries, URL guard
 src/ratelimit.js       fixed-window counters in PostgreSQL

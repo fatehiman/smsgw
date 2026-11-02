@@ -91,3 +91,27 @@ test('mihan: SOAP envelope, field parsing, number format', () => {
   assert.equal(m.localNumber('9121234567'), '09121234567');
   assert.equal(m.localNumber('+441234567890'), '+441234567890');
 });
+
+test('billing: SMS parts (GSM-7 160/153, UCS-2 70/67)', () => {
+  const { countParts } = require('../src/billing');
+  assert.equal(countParts('a'.repeat(160)), 1);
+  assert.equal(countParts('a'.repeat(161)), 2);
+  assert.equal(countParts('a'.repeat(306)), 2);
+  assert.equal(countParts('a'.repeat(307)), 3);
+  assert.equal(countParts('{'.repeat(80)), 1); // extension chars count 2
+  assert.equal(countParts('{'.repeat(81)), 2);
+  assert.equal(countParts('س'.repeat(70)), 1);
+  assert.equal(countParts('س'.repeat(71)), 2);
+  assert.equal(countParts('س'.repeat(134)), 2);
+  assert.equal(countParts('س'.repeat(135)), 3);
+  assert.equal(countParts(`${'a'.repeat(65)}\nلغو11`), 2); // the Persian footer makes the whole SMS UCS-2
+  assert.equal(countParts(''), 1);
+});
+
+test('billing: template body is filled and counted', () => {
+  const { fillTemplate, templateParts } = require('../src/billing');
+  assert.equal(fillTemplate('Code {{code}} / {minutes} / %code / {x}', { code: '12', minutes: '5' }), 'Code 12 / 5 / 12 / {x}');
+  assert.equal(fillTemplate('%token2 %token', { token: 'a', token2: 'b' }), 'b a');
+  assert.equal(templateParts('', { code: '1' }), 1);
+  assert.equal(templateParts('کد {code}', { code: 'x'.repeat(100) }), 2);
+});

@@ -76,7 +76,7 @@ select:has(option[value=""]:checked){color:var(--ph)}select option{color:initial
 .secret{font-family:ui-monospace,Consolas,monospace;background:var(--bg);border:1px dashed var(--line);padding:10px;border-radius:8px;word-break:break-all;font-size:14px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}.stat b{display:block;font-size:22px}.stat span{font-size:12px;color:var(--muted)}
-.muted{color:var(--muted)}.mono{font-family:ui-monospace,Consolas,monospace;font-size:13px;word-break:break-all}
+.muted{color:var(--muted)}.neg{color:var(--red-i)}.mono{font-family:ui-monospace,Consolas,monospace;font-size:13px;word-break:break-all}
 .login{max-width:340px;margin:12vh auto;padding:0 16px}
 @media (max-width:600px){main{padding:10px}th,td{padding:6px 5px}}
 `;

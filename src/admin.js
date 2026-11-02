@@ -6,12 +6,14 @@ const providers = require('./providers');
 const settings = require('./settings');
 const webhooks = require('./webhooks');
 const blacklist = require('./blacklist');
+const billing = require('./billing');
 const ui = require('./admin-ui');
 const {
   ApiError, sha256, hmac, randomToken, randomHex, safeEqual, verifyPassword, readBody, parseBody,
 } = require('./util');
 
 const { esc, ib, postBtn, badge, fmtTime } = ui;
+const { fmtMoney, CURRENCY } = billing;
 const SESSION_TTL = 8 * 3600;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,30}$/;
 
@@ -65,6 +67,16 @@ const intOrNull = (v) => {
   if (v === undefined || String(v).trim() === '') return null;
   const n = Number(v);
   if (!Number.isInteger(n) || n < 0 || n > 1e9) throw new ApiError(422, 'invalid', 'Limits must be whole numbers, 0 or more');
+  return n;
+};
+// money in IRT, 2 decimals; empty = null. Commas are allowed (10,000).
+const moneyOrNull = (v, label) => {
+  const t = String(v ?? '').trim().replace(/,/g, '');
+  if (t === '') return null;
+  const n = Number(t);
+  if (!Number.isFinite(n) || Math.abs(n) > 1e11 || Math.abs(Math.round(n * 100) - n * 100) > 1e-6) {
+    throw new ApiError(422, 'invalid', `${label}: a number with at most 2 decimals`);
+  }
   return n;
 };
 
@@ -212,17 +224,17 @@ route('GET', /^\/mainadmin\/providers\/(\d+)$/, async (ctx) => {
       ${hidden(ctx)}<input type="text" name="code" value="${esc(t.code)}" style="max-width:130px" aria-label="Template ID">
       <input type="text" name="name" value="${esc(t.name)}" style="max-width:170px" aria-label="Name">
       <input type="text" name="params" value="${esc(t.param_names.join(', '))}" style="max-width:190px" aria-label="Parameters" placeholder="code, name">
-      <input type="text" name="body" value="${esc(t.body)}" style="max-width:260px" aria-label="Preview text" placeholder="optional preview text">
+      <input type="text" name="body" value="${esc(t.body)}" style="max-width:260px" aria-label="Template text" placeholder="text, e.g. کد شما {code}">
       ${ib('pencil', 'Save template', 'amber')}</form>
       <form method="post" action="/mainadmin/templates/${t.id}/delete" class="inline" style="margin-top:4px">${hidden(ctx)}${ib('trash', 'Delete template', 'red', { confirm: 'Delete this template?' })}</form></td></tr>`).join('');
     tpl = `<h2>Templates</h2><div class="card"><p class="muted">This provider sends a template ID and parameters, not free text. API callers must use these.
-      Parameter names: comma separated, in the order the provider expects them.</p>
-      <table><tr><th>Template ID</th><th>Name</th><th>Parameters</th><th>Preview text</th></tr>${rowsHtml || '<tr><td colspan="4" class="muted">No templates yet. Callers cannot send until you add one.</td></tr>'}</table>
+      Parameter names: comma separated, in the order the provider expects them. Text: the template text with <span class="mono">{name}</span> for each parameter; it is used to count SMS parts for billing (empty = 1 part).</p>
+      <table><tr><th>Template ID</th><th>Name</th><th>Parameters</th><th>Text (counts SMS parts)</th></tr>${rowsHtml || '<tr><td colspan="4" class="muted">No templates yet. Callers cannot send until you add one.</td></tr>'}</table>
       <form method="post" action="/mainadmin/providers/${p.id}/templates" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:12px">${hidden(ctx)}
       <input type="text" name="code" placeholder="Template ID, e.g. verify" style="max-width:150px" aria-label="Template ID">
       <input type="text" name="name" placeholder="Name" style="max-width:170px" aria-label="Name">
       <input type="text" name="params" placeholder="Params, e.g. code, minutes" style="max-width:200px" aria-label="Parameters">
-      <input type="text" name="body" placeholder="Preview text (optional)" style="max-width:240px" aria-label="Preview text">${ib('plus', 'Add template', 'green')}</form></div>`;
+      <input type="text" name="body" placeholder="Text, e.g. کد شما {code}" style="max-width:240px" aria-label="Template text">${ib('plus', 'Add template', 'green')}</form></div>`;
   }
   return page(ctx, p.name, `<h1>${esc(p.name)} ${badge(d.type, d.type === 'template' ? 'info' : '')}</h1>
     <form class="card" method="post" action="/mainadmin/providers/${p.id}">${hidden(ctx)}
@@ -309,15 +321,21 @@ route('POST', /^\/mainadmin\/templates\/(\d+)\/delete$/, async (ctx) => {
 });
 
 // --- API tokens
+// linked: provider id -> price per part (null = free)
 async function tokenForm(ctx, t, allProviders, linked) {
   const checks = allProviders.map((p) => {
     const d = providers.get(p.driver);
-    return `<label class="check"><input type="checkbox" name="providers" value="${p.id}" ${linked.includes(p.id) ? 'checked' : ''}> ${esc(p.name)} <span class="muted mono">${esc(p.slug)}</span> ${badge(d?.type || '?', d?.type === 'template' ? 'info' : '')}${p.is_default ? badge('global default', 'warn') : ''}${p.enabled ? '' : badge('disabled', 'bad')}</label>`;
+    const price = linked.get(p.id) ?? '';
+    return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label class="check" style="flex:1;min-width:240px"><input type="checkbox" name="providers" value="${p.id}" ${linked.has(p.id) ? 'checked' : ''}> ${esc(p.name)} <span class="muted mono">${esc(p.slug)}</span> ${badge(d?.type || '?', d?.type === 'template' ? 'info' : '')}${p.is_default ? badge('global default', 'warn') : ''}${p.enabled ? '' : badge('disabled', 'bad')}</label>
+      <input type="text" inputmode="decimal" name="price_${p.id}" value="${esc(price)}" placeholder="free" style="max-width:110px" aria-label="Price per SMS part, ${esc(p.name)}" title="Price per SMS part (${CURRENCY}). Empty = free, not billed"><span class="muted">${CURRENCY} / part</span></div>`;
   }).join('');
   const opts = `<option value="">(automatic)</option>${allProviders.map((p) => `<option value="${p.id}" ${t.default_provider_id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}`;
   const lim = (k, label) => `<div><label for="l${k}">${label}</label><input id="l${k}" type="number" min="0" name="limit_${k}" value="${t[`limit_${k}`] ?? ''}" placeholder="default" style="max-width:130px"></div>`;
   return `<label for="name">Name (project) *</label><input id="name" type="text" name="name" value="${esc(t.name || '')}" placeholder="e.g. Shop website">
-    <label>Providers this key may use</label>${checks || '<div class="muted">Add a provider first.</div>'}
+    <label>Providers this key may use, and the price of one SMS part</label>${checks || '<div class="muted">Add a provider first.</div>'}
+    <div class="help">Empty price = this provider is free for this key (no charge, no balance check). Parts: Persian text 70 characters for 1 part, 67 per part when longer.</div>
+    <label for="cl">Allowed debt (${CURRENCY})</label><input id="cl" type="text" inputmode="decimal" name="credit_limit" value="${esc(t.credit_limit || '')}" placeholder="0" style="max-width:160px">
+    <div class="help">The balance may go down to minus this amount (e.g. 10000 = down to -10,000 ${CURRENCY}). After that, sending is refused with "insufficient_balance".</div>
     <label for="dp">Default provider for this key</label><select id="dp" name="default_provider_id">${opts}</select>
     <div class="help">Automatic = the global default provider if this key may use it, otherwise the first provider ticked above.</div>
     <label for="inn">Incoming numbers (optional)</label><input id="inn" type="text" name="inbound_numbers" value="${esc((t.inbound_numbers || []).join(', '))}" placeholder="e.g. 3000123, 0912...">
@@ -326,29 +344,38 @@ async function tokenForm(ctx, t, allProviders, linked) {
     <div style="display:flex;gap:12px;flex-wrap:wrap">${lim('minute', 'Per minute')}${lim('hour', 'Per hour')}${lim('day', 'Per day')}</div>`;
 }
 
+const money = (v) => `<span class="${v < 0 ? 'neg' : ''}">${fmtMoney(v)}</span>`;
+function balanceCell(t) {
+  if (!t.billed) return `<span class="muted">billing off</span>${t.balance ? ` <span class="mono">${money(t.balance)}</span>` : ''}`;
+  const out = t.balance + t.credit_limit <= 0;
+  return `<span class="mono">${money(t.balance)}</span>${out ? ` ${badge('no credit', 'bad')}` : ''}<div class="help">debt allowed ${fmtMoney(t.credit_limit)}</div>`;
+}
+
 route('GET', /^\/mainadmin\/tokens$/, async (ctx) => {
   const defaults = await settings.getLimits();
   const rows = (await q(`SELECT t.*, dp.name AS dp_name,
+    EXISTS (SELECT 1 FROM token_providers tp WHERE tp.token_id=t.id AND tp.price IS NOT NULL) AS billed,
     COALESCE((SELECT string_agg(p.slug, ', ' ORDER BY tp.position, p.id) FROM token_providers tp JOIN providers p ON p.id=tp.provider_id WHERE tp.token_id=t.id), '') AS provs
     FROM api_tokens t LEFT JOIN providers dp ON dp.id=t.default_provider_id ORDER BY t.id`)).rows;
   const lim = (own, def) => (own === null ? `${def}*` : own === 0 ? '∞' : own);
   const trs = rows.map((t) => `<tr><td><b>${esc(t.name)}</b><div class="muted mono">${esc(t.token_prefix)}…</div></td>
     <td class="mono">${esc(t.provs) || '—'}</td><td>${esc(t.dp_name || 'auto')}</td>
     <td class="mono">${lim(t.limit_minute, defaults.minute)} / ${lim(t.limit_hour, defaults.hour)} / ${lim(t.limit_day, defaults.day)}</td>
+    <td>${balanceCell(t)}</td>
     <td>${t.enabled ? badge('active', 'ok') : badge('off', 'bad')}</td><td class="muted">${fmtTime(t.last_used_at)}</td>
     <td><div class="row-actions">${ib('pencil', 'Edit key and webhooks', 'amber', { href: `/mainadmin/tokens/${t.id}` })}
     ${postBtn(`/mainadmin/tokens/${t.id}/rotate`, ctx.s.csrf, 'key', 'Rotate token (old token stops working now)', 'purple', 'Rotate this token? The old token stops working immediately.')}
     ${postBtn(`/mainadmin/tokens/${t.id}/toggle`, ctx.s.csrf, 'power', t.enabled ? 'Turn off' : 'Turn on', 'gray')}
-    ${postBtn(`/mainadmin/tokens/${t.id}/delete`, ctx.s.csrf, 'trash', 'Delete key', 'red', `Delete key ${t.name}?`)}</div></td></tr>`).join('');
+    ${postBtn(`/mainadmin/tokens/${t.id}/delete`, ctx.s.csrf, 'trash', 'Delete key', 'red', `Delete key ${t.name}? Its balance and payment history are deleted too.`)}</div></td></tr>`).join('');
   return page(ctx, 'API tokens', `<h1>API tokens ${ib('plus', 'New API token', 'green', { href: '/mainadmin/tokens/new' })}</h1>
-    <div class="card"><table><tr><th>Name</th><th>Providers</th><th>Default</th><th>Limits min/hour/day</th><th>State</th><th>Last used</th><th></th></tr>${trs || '<tr><td colspan="7" class="muted">No API tokens yet.</td></tr>'}</table>
-    <div class="help">* = global default. ∞ = no limit.</div></div>`, 'tokens');
+    <div class="card"><table><tr><th>Name</th><th>Providers</th><th>Default</th><th>Limits min/hour/day</th><th>Balance ${CURRENCY}</th><th>State</th><th>Last used</th><th></th></tr>${trs || '<tr><td colspan="8" class="muted">No API tokens yet.</td></tr>'}</table>
+    <div class="help">* = global default. ∞ = no limit. Balance: "billing off" = no provider of this key has a price.</div></div>`, 'tokens');
 });
 
 route('GET', /^\/mainadmin\/tokens\/new$/, async (ctx) => {
   const all = (await q('SELECT * FROM providers ORDER BY id')).rows;
   return page(ctx, 'New API token', `<h1>New API token</h1><form class="card" method="post" action="/mainadmin/tokens">${hidden(ctx)}
-    ${await tokenForm(ctx, {}, all, all.map((p) => p.id))}<button class="btn txt-btn" type="submit">Create</button></form>`, 'tokens');
+    ${await tokenForm(ctx, {}, all, new Map(all.map((p) => [p.id, null])))}<button class="btn txt-btn" type="submit">Create</button></form>`, 'tokens');
 });
 
 async function readTokenForm(body) {
@@ -357,9 +384,18 @@ async function readTokenForm(body) {
   const ids = arr(body.providers).map(Number).filter(Number.isInteger);
   const valid = ids.length ? (await q('SELECT id FROM providers WHERE id = ANY($1::int[]) ORDER BY id', [ids])).rows.map((r) => r.id) : [];
   const dp = body.default_provider_id ? Number(body.default_provider_id) : null;
+  const prices = new Map();
+  for (const id of valid) {
+    const v = moneyOrNull(body[`price_${id}`], 'Price per part');
+    if (v !== null && v < 0) throw new ApiError(422, 'invalid', 'Price per part cannot be negative');
+    prices.set(id, v);
+  }
+  const credit = moneyOrNull(body.credit_limit, 'Allowed debt');
   return {
     name,
     providerIds: valid,
+    prices,
+    creditLimit: Math.abs(credit ?? 0), // "-10000" and "10000" mean the same
     defaultId: dp && valid.includes(dp) ? dp : null,
     numbers: String(body.inbound_numbers || '').split(/[,\s]+/).filter(Boolean).slice(0, 20),
     lm: intOrNull(body.limit_minute),
@@ -368,9 +404,11 @@ async function readTokenForm(body) {
   };
 }
 
-async function saveLinks(c, tokenId, ids) {
+async function saveLinks(c, tokenId, ids, prices) {
   await c.query('DELETE FROM token_providers WHERE token_id=$1', [tokenId]);
-  for (let i = 0; i < ids.length; i++) await c.query('INSERT INTO token_providers (token_id, provider_id, position) VALUES ($1,$2,$3)', [tokenId, ids[i], i]);
+  for (let i = 0; i < ids.length; i++) {
+    await c.query('INSERT INTO token_providers (token_id, provider_id, position, price) VALUES ($1,$2,$3,$4)', [tokenId, ids[i], i, prices.get(ids[i]) ?? null]);
+  }
 }
 
 const showToken = (ctx, title, name, token) => html(ui.layout(title, `<main><h1>${esc(title)}</h1><div class="card">
@@ -384,11 +422,11 @@ route('POST', /^\/mainadmin\/tokens$/, async (ctx) => {
   const token = randomToken();
   const id = await tx(async (c) => {
     const r = await c.query(
-      `INSERT INTO api_tokens (name, token_hash, token_prefix, default_provider_id, inbound_numbers, limit_minute, limit_hour, limit_day)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-      [f.name, sha256(token), token.slice(0, 8), f.defaultId, f.numbers, f.lm, f.lh, f.ld],
+      `INSERT INTO api_tokens (name, token_hash, token_prefix, default_provider_id, inbound_numbers, limit_minute, limit_hour, limit_day, credit_limit)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [f.name, sha256(token), token.slice(0, 8), f.defaultId, f.numbers, f.lm, f.lh, f.ld, f.creditLimit],
     );
-    await saveLinks(c, r.rows[0].id, f.providerIds);
+    await saveLinks(c, r.rows[0].id, f.providerIds, f.prices);
     return r.rows[0].id;
   });
   return showToken(ctx, 'API token created', f.name, token);
@@ -403,7 +441,16 @@ async function loadToken(id) {
 route('GET', /^\/mainadmin\/tokens\/(\d+)$/, async (ctx) => {
   const t = await loadToken(ctx.params[0]);
   const all = (await q('SELECT * FROM providers ORDER BY id')).rows;
-  const linked = (await q('SELECT provider_id FROM token_providers WHERE token_id=$1', [t.id])).rows.map((r) => r.provider_id);
+  const links = (await q('SELECT provider_id, price FROM token_providers WHERE token_id=$1', [t.id])).rows;
+  const linked = new Map(links.map((r) => [r.provider_id, r.price]));
+  const txBefore = Number(ctx.url.searchParams.get('tx_before')) || null;
+  const txs = await billing.history(t.id, { limit: 100, beforeId: txBefore });
+  const kinds = { payment: ['payment', 'ok'], adjust: ['correction', 'warn'], sms: ['SMS', 'info'] };
+  const txRows = txs.map((x) => `<tr><td class="muted">${x.id}</td><td class="muted">${fmtTime(x.created_at)}</td>
+    <td>${badge(...kinds[x.kind])}</td><td class="mono">${money(x.amount)}</td><td class="mono">${money(x.balance_after)}</td>
+    <td>${x.kind === 'sms' ? `<span class="muted">message #${x.message_id} · ${x.parts} part(s) × ${fmtMoney(x.unit_price)}</span>` : esc(x.note)}</td></tr>`).join('');
+  const txNext = txs.length === 100 ? `<p><a href="?tx_before=${txs[txs.length - 1].id}">Older transactions →</a></p>` : '';
+  const billed = links.some((r) => r.price !== null);
   const hooks = (await q(`SELECT w.*, (SELECT count(*) FROM webhook_deliveries d WHERE d.webhook_id=w.id AND d.status='failed')::int AS failed,
     (SELECT count(*) FROM webhook_deliveries d WHERE d.webhook_id=w.id AND d.status='pending')::int AS pending FROM webhooks w WHERE w.token_id=$1 ORDER BY w.id`, [t.id])).rows;
   const hrows = hooks.map((w) => `<tr><td class="mono">${esc(w.url)}</td><td class="mono">${esc(w.events.join(', '))}</td>
@@ -414,6 +461,18 @@ route('GET', /^\/mainadmin\/tokens\/(\d+)$/, async (ctx) => {
   return page(ctx, t.name, `<h1>${esc(t.name)} <span class="muted mono">${esc(t.token_prefix)}…</span></h1>
     <form class="card" method="post" action="/mainadmin/tokens/${t.id}">${hidden(ctx)}${await tokenForm(ctx, t, all, linked)}
     <button class="btn txt-btn" type="submit">Save</button></form>
+    <h2>Balance and payments</h2><div class="card">
+    <div class="grid"><div class="stat"><b>${money(t.balance)}</b><span>balance, ${CURRENCY}</span></div>
+    <div class="stat"><b>${fmtMoney(t.credit_limit)}</b><span>allowed debt (down to −${fmtMoney(t.credit_limit)})</span></div>
+    <div class="stat"><b>${money(billing.round2(t.balance + t.credit_limit))}</b><span>can still spend, ${CURRENCY}</span></div></div>
+    ${billed ? '' : '<p class="help">Billing is off for this key: no provider has a price, so nothing is charged and nothing is blocked.</p>'}
+    <form method="post" action="/mainadmin/tokens/${t.id}/transactions" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:12px">${hidden(ctx)}
+    <select name="kind" style="width:auto" aria-label="Type"><option value="payment">Payment (+)</option><option value="adjust">Correction (+ or −)</option></select>
+    <input type="text" inputmode="decimal" name="amount" placeholder="Amount, ${CURRENCY}" style="max-width:150px" aria-label="Amount">
+    <input type="text" name="note" placeholder="Note, e.g. bank receipt number" style="max-width:300px" aria-label="Note">
+    ${ib('plus', 'Save transaction', 'green')}</form>
+    <div class="help">A correction can be negative (e.g. -5000) to fix a wrong payment. Transactions cannot be edited or deleted.</div>
+    <table style="margin-top:10px"><tr><th>#</th><th>Time (UTC)</th><th>Type</th><th>Amount</th><th>Balance after</th><th>Details</th></tr>${txRows || '<tr><td colspan="6" class="muted">No transactions yet.</td></tr>'}</table>${txNext}</div>
     <h2>Webhooks</h2><div class="card"><p class="muted">The gateway sends a JSON POST here for received SMS and delivery status changes. Header <span class="mono">X-SMSGW-Signature</span> = sha256 HMAC of <span class="mono">timestamp.body</span> with the secret.</p>
     <table><tr><th>URL</th><th>Events</th><th>State</th><th>Secret</th><th></th></tr>${hrows || '<tr><td colspan="5" class="muted">No webhooks.</td></tr>'}</table>
     <form method="post" action="/mainadmin/tokens/${t.id}/webhooks" style="margin-top:12px">${hidden(ctx)}
@@ -427,12 +486,24 @@ route('POST', /^\/mainadmin\/tokens\/(\d+)$/, async (ctx) => {
   const f = await readTokenForm(ctx.body);
   await tx(async (c) => {
     await c.query(
-      `UPDATE api_tokens SET name=$2, default_provider_id=$3, inbound_numbers=$4, limit_minute=$5, limit_hour=$6, limit_day=$7 WHERE id=$1`,
-      [t.id, f.name, f.defaultId, f.numbers, f.lm, f.lh, f.ld],
+      `UPDATE api_tokens SET name=$2, default_provider_id=$3, inbound_numbers=$4, limit_minute=$5, limit_hour=$6, limit_day=$7, credit_limit=$8 WHERE id=$1`,
+      [t.id, f.name, f.defaultId, f.numbers, f.lm, f.lh, f.ld, f.creditLimit],
     );
-    await saveLinks(c, t.id, f.providerIds);
+    await saveLinks(c, t.id, f.providerIds, f.prices);
   });
   return back(`/mainadmin/tokens/${t.id}`, 'Saved', null);
+});
+
+route('POST', /^\/mainadmin\/tokens\/(\d+)\/transactions$/, async (ctx) => {
+  const t = await loadToken(ctx.params[0]);
+  const kind = ctx.body.kind === 'adjust' ? 'adjust' : 'payment';
+  const amount = moneyOrNull(ctx.body.amount, 'Amount');
+  const note = String(ctx.body.note || '').trim().slice(0, 300);
+  if (!amount) throw new ApiError(422, 'invalid', 'Amount is required and cannot be 0');
+  if (kind === 'payment' && amount < 0) throw new ApiError(422, 'invalid', 'A payment must be more than 0. Use "Correction" to take money away.');
+  if (kind === 'adjust' && !note) throw new ApiError(422, 'invalid', 'A correction needs a note (why)');
+  const balance = await billing.addTransaction(t.id, kind, amount, note);
+  return back(`/mainadmin/tokens/${t.id}`, `Saved. New balance: ${fmtMoney(balance)} ${CURRENCY}`, null);
 });
 
 route('POST', /^\/mainadmin\/tokens\/(\d+)\/rotate$/, async (ctx) => {
@@ -512,8 +583,9 @@ function messageTable(rows) {
   const trs = rows.map((m) => `<tr><td class="muted">${m.id}</td><td class="muted">${fmtTime(m.created_at)}</td>
     <td>${m.direction === 'out' ? '→' : '←'}</td><td class="mono">${esc(m.peer)}</td><td>${esc(m.token_name || '—')}</td><td class="mono">${esc(m.provider_slug || '—')}</td>
     <td>${esc(m.body ?? (m.template_code ? `[${m.template_code}] ${JSON.stringify(m.params)}` : ''))}</td>
-    <td>${badge(m.status, st[m.status] || '')}${m.error ? `<div class="help">${esc(m.error)}</div>` : ''}</td></tr>`).join('');
-  return `<table><tr><th>#</th><th>Time (UTC)</th><th></th><th>Number</th><th>Key</th><th>Provider</th><th>Content</th><th>Status</th></tr>${trs || '<tr><td colspan="8" class="muted">No messages.</td></tr>'}</table>`;
+    <td>${badge(m.status, st[m.status] || '')}${m.error ? `<div class="help">${esc(m.error)}</div>` : ''}</td>
+    <td class="mono muted">${m.parts ?? ''}${m.cost != null ? ` · ${fmtMoney(m.cost)}` : ''}</td></tr>`).join('');
+  return `<table><tr><th>#</th><th>Time (UTC)</th><th></th><th>Number</th><th>Key</th><th>Provider</th><th>Content</th><th>Status</th><th title="SMS parts · cost in ${CURRENCY}">Parts · ${CURRENCY}</th></tr>${trs || '<tr><td colspan="9" class="muted">No messages.</td></tr>'}</table>`;
 }
 
 route('GET', /^\/mainadmin\/messages$/, async (ctx) => {

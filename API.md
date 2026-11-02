@@ -20,7 +20,9 @@ Many wrong tokens from one IP also give `429` (`too_many_failures`).
 
 | Method | Path | What |
 |---|---|---|
-| GET | `/me` | Key name, allowed providers, effective default provider |
+| GET | `/me` | Key name, allowed providers, effective default provider, `balance` (same as `/balance`) |
+| GET | `/balance` | Balance, allowed debt, what you can still spend, price per SMS part of each provider |
+| GET | `/transactions` | Payments and SMS charges, newest first. `limit` (≤200), `before_id` |
 | GET | `/usage` | Your limits and how much this IP has used |
 | GET | `/providers` | Allowed providers: `type` (`text`/`template`), `is_default`, templates |
 | GET | `/providers/{slug}/templates` | Templates of a template provider |
@@ -68,11 +70,13 @@ Reply `201`:
 
 ```json
 {"ok":true,"message":{"id":42,"direction":"out","provider":"txt","to":"09121234567","text":"Hello",
- "status":"sent","provider_message_id":"123","error":null,"reference":null,
+ "status":"sent","provider_message_id":"123","error":null,"reference":null,"parts":1,"cost":150,
  "created_at":"2026-11-01T10:00:00.000Z","updated_at":"2026-11-01T10:00:00.000Z"}}
 ```
 
 Status: `queued` → `sent` → `delivered` (if the provider reports it) or `failed`.
+
+`parts` = number of SMS parts. `cost` = what this SMS cost in IRT (`null` = not charged: free provider, or the send failed).
 
 ### Errors
 
@@ -87,11 +91,46 @@ Status: `queued` → `sent` → `delivered` (if the provider reports it) or `fai
 | 422 | `text_not_supported` | You sent `text` to a **template** provider |
 | 422 | `template_required`, `template_not_found` | Template provider needs a known `template` (`details.templates` lists them) |
 | 422 | `params_invalid` | `details.expected`, `missing`, `unknown` |
+| 402 | `insufficient_balance` | Not enough money. Nothing is sent. `details`: `cost`, `parts`, `price_per_part`, `balance`, `allowed_debt`, `available`, `message` (saved as `failed`) |
 | 403 | `number_blacklisted` | The recipient sent `11` (opt-out): nothing is sent to it, from any key, until it sends `12`. The message is saved as `failed` (`details.message`) |
 | 429 | `rate_limited` | See Rate limits |
 | 502 | `provider_error`, `provider_rejected`, `network_error` | The provider failed. The message is saved as `failed` and returned in `details.message` |
 
 These checks also apply when the default provider is used.
+
+## Balance and prices
+
+Money is in Toman (`IRT`). The admin sets, for your key, a **price for one SMS part** for each provider, and an
+**allowed debt**. The admin adds your payments.
+
+```bash
+curl -s https://smsgw.kimiasoft.ir/api/v1/balance -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"ok":true,"currency":"IRT","balance":25000,"allowed_debt":10000,"available":35000,
+ "prices":[{"provider":"mihan","price_per_part":150},{"provider":"kavenegar","price_per_part":null}]}
+```
+
+- `price_per_part: null` = that provider is free for your key (no charge, no balance check).
+- Cost of one SMS = `parts × price_per_part`. Parts: text with only Latin (GSM-7) characters = 160 characters for 1 part,
+  153 per part when longer. Any other character (Persian, emoji) = 70 for 1 part, 67 per part. The footer `\nلغو11` is
+  part of the text, so a text SMS is always counted as Persian. A template SMS is counted from the template text the admin saved
+  (no saved text = 1 part).
+- The SMS is charged when the provider **accepts** it. If the provider refuses it (`502`), nothing is charged.
+  A later `failed` delivery report does not give money back.
+- A send is refused with `402 insufficient_balance` if `balance - cost` would go below `-allowed_debt`.
+  Example: allowed debt 10000 → the balance may go down to −10,000; the next SMS is refused.
+
+`GET /transactions`:
+
+```json
+{"ok":true,"currency":"IRT","transactions":[
+ {"id":9,"kind":"sms","amount":-300,"balance_after":24700,"note":null,"message_id":42,"parts":2,"price_per_part":150,"created_at":"..."},
+ {"id":8,"kind":"payment","amount":25000,"balance_after":25000,"note":"receipt 1234","message_id":null,"parts":null,"price_per_part":null,"created_at":"..."}]}
+```
+
+`kind`: `payment` (money added by the admin), `adjust` (a correction by the admin, + or −), `sms` (one charged SMS).
 
 ## Receiving SMS
 

@@ -3,6 +3,7 @@ const { q } = require('./db');
 const providers = require('./providers');
 const webhooks = require('./webhooks');
 const blacklist = require('./blacklist');
+const billing = require('./billing');
 const { ApiError, normalizePhone } = require('./util');
 
 const MAX_TEXT = 2000;
@@ -58,7 +59,8 @@ async function buildMessage(provider, driver, body) {
     }
     if (body.text.length > MAX_TEXT) throw new ApiError(422, 'text_too_long', `"text" is longer than ${MAX_TEXT} characters`, info);
     // every text SMS ends with «لغو11» after a line break (src/blacklist.js, fixed rule)
-    return { to, text: blacklist.withFooter(body.text), template: null, params: null, paramList: [] };
+    const text = blacklist.withFooter(body.text);
+    return { to, text, template: null, params: null, paramList: [], parts: billing.countParts(text) };
   }
 
   // template provider
@@ -95,7 +97,10 @@ async function buildMessage(provider, driver, body) {
     if (String(v).length > MAX_PARAM) throw new ApiError(422, 'params_invalid', `Parameter "${n}" is too long`, info);
     clean[n] = String(v);
   }
-  return { to, text: null, template: code, params: clean, paramList: tpl.param_names.map((n) => clean[n]) };
+  return {
+    to, text: null, template: code, params: clean, paramList: tpl.param_names.map((n) => clean[n]),
+    parts: billing.templateParts(tpl.body, clean), // counted from the admin's template body (no body = 1)
+  };
 }
 
 async function sendSms(token, body) {
@@ -114,19 +119,36 @@ async function sendSms(token, body) {
   if (listed) {
     const why = 'number_blacklisted: the recipient sent 11 (opt-out) and is on the blacklist; no SMS can be sent to it until it sends 12';
     const failed = (await q(
-      `INSERT INTO messages (token_id, provider_id, direction, peer, body, template_code, params, status, error, reference)
-       VALUES ($1,$2,'out',$3,$4,$5,$6,'failed',$7,$8) RETURNING id`,
-      [token.id, provider.id, msg.to, msg.text, msg.template, msg.params, why, reference],
+      `INSERT INTO messages (token_id, provider_id, direction, peer, body, template_code, params, status, error, reference, parts)
+       VALUES ($1,$2,'out',$3,$4,$5,$6,'failed',$7,$8,$9) RETURNING id`,
+      [token.id, provider.id, msg.to, msg.text, msg.template, msg.params, why, reference, msg.parts],
     )).rows[0];
     throw new ApiError(403, 'number_blacklisted',
       `This number is in the blacklist (the recipient sent 11 to stop SMS) since ${listed.since.toISOString()}. No SMS is sent until it sends 12.`,
       { message: await getMessage(token.id, failed.id), since: listed.since });
   }
   const row = (await q(
-    `INSERT INTO messages (token_id, provider_id, direction, peer, body, template_code, params, status, reference)
-     VALUES ($1,$2,'out',$3,$4,$5,$6,'queued',$7) RETURNING id`,
-    [token.id, provider.id, msg.to, msg.text, msg.template, msg.params, reference],
+    `INSERT INTO messages (token_id, provider_id, direction, peer, body, template_code, params, status, reference, parts)
+     VALUES ($1,$2,'out',$3,$4,$5,$6,'queued',$7,$8) RETURNING id`,
+    [token.id, provider.id, msg.to, msg.text, msg.template, msg.params, reference, msg.parts],
   )).rows[0];
+
+  // billing (src/billing.js): no price for this key + provider = free, no balance check
+  const price = await billing.priceFor(token.id, provider.id);
+  const charged = price !== null;
+  if (charged && !(await billing.reserve(token.id, row.id, msg.parts, price))) {
+    const cost = billing.round2(msg.parts * price);
+    const t = (await q('SELECT balance, credit_limit FROM api_tokens WHERE id=$1', [token.id])).rows[0];
+    const why = `insufficient_balance: cost ${cost} ${billing.CURRENCY}, balance ${t.balance}, allowed debt ${t.credit_limit}`;
+    await q(`UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1`, [row.id, why]);
+    throw new ApiError(402, 'insufficient_balance',
+      `Not enough balance: this SMS costs ${cost} ${billing.CURRENCY} (${msg.parts} part(s) × ${price}), the balance is ${t.balance} and the allowed debt is ${t.credit_limit}. Ask the admin to add a payment.`,
+      {
+        currency: billing.CURRENCY, cost, parts: msg.parts, price_per_part: price,
+        balance: t.balance, allowed_debt: t.credit_limit, available: billing.round2(t.balance + t.credit_limit),
+        message: await getMessage(token.id, row.id),
+      });
+  }
 
   try {
     const r = await driver.send({ settings: provider.settings, provider }, msg);
@@ -135,6 +157,7 @@ async function sendSms(token, body) {
       [row.id, r.status || 'sent', r.providerMessageId || null],
     );
   } catch (e) {
+    if (charged) await billing.release(token.id, row.id).catch((x) => console.error('billing release:', x.message));
     await q(`UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1`, [row.id, String(e.message).slice(0, 500)]);
     const m = await getMessage(token.id, row.id);
     webhooks.enqueue(token.id, 'sms.status', m).catch(() => {});
@@ -156,6 +179,7 @@ function present(r) {
     provider_message_id: r.provider_message_id,
     error: r.error,
     reference: r.reference,
+    ...(r.direction === 'out' ? { parts: r.parts, cost: r.cost } : {}),
     created_at: r.created_at,
     updated_at: r.updated_at,
     ...(r.direction === 'in' ? { read: r.read_at != null } : {}),

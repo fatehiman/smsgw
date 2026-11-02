@@ -194,7 +194,33 @@ curl -s $BASE/usage -H "Authorization: Bearer $TOKEN"     # your limits and use 
 
 Tip: do not retry in a tight loop. Sleep for `Retry-After` seconds.
 
-## 8. Errors
+## 8. Balance and price
+
+Your key can have a **balance** (in Toman, `IRT`). The admin sets:
+
+- the **price of one SMS part** for each provider of your key (no price = free for you);
+- the **allowed debt**, for example `10000`: your balance may go down to −10,000 IRT.
+
+The admin adds your **payments**. Each charged SMS takes `parts × price` from the balance.
+
+```bash
+curl -s $BASE/balance -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"ok":true,"currency":"IRT","balance":25000,"allowed_debt":10000,"available":35000,
+ "prices":[{"provider":"mihan-main","price_per_part":150}]}
+```
+
+- `available` = what you can still spend (`balance + allowed_debt`).
+- **Parts.** A Persian SMS: up to 70 characters = 1 part; longer = 67 characters per part. Every text SMS gets the
+  footer `لغو11` on a new line (6 characters), so count it too. Example: 65 characters + footer = 71 → **2 parts**.
+- The reply of every send has `parts` and `cost`.
+- You pay only when the provider **accepts** the SMS. If the provider fails (`502`), you pay nothing.
+- When the money is not enough, the send fails with `402 insufficient_balance`. Nothing is sent. Ask the admin to add a payment.
+- History of payments and charges: `GET $BASE/transactions` (newest first, `balance_after` on each row).
+
+## 9. Errors
 
 Errors look like this:
 
@@ -213,6 +239,7 @@ Errors look like this:
 | `text_not_supported` (422) | You sent `text` to a template provider. Send `template` + `params`. |
 | `template_required`, `template_not_found` (422) | Use a template from `GET /providers`. |
 | `params_invalid` (422) | `details` lists `expected`, `missing`, `unknown` parameter names. |
+| `insufficient_balance` (402) | Not enough balance. Nothing was sent. `details` has `cost`, `balance`, `available`. Ask the admin for a payment. |
 | `number_blacklisted` (403) | The recipient sent `11` (opt-out). Do not retry; it works again only after they send `12`. |
 | `rate_limited` (429) | Wait `Retry-After` seconds. |
 | `provider_error`, `provider_rejected`, `network_error` (502) | The provider failed (for example no credit). The message is saved as `failed`; see `details.message`. |
@@ -220,7 +247,7 @@ Errors look like this:
 A `502` can be temporary. Do not blindly resend if you are not sure: look at `GET /sms?status=failed`,
 or use `reference` to avoid sending the same SMS twice.
 
-## 9. Examples in code
+## 10. Examples in code
 
 Node.js (18+):
 

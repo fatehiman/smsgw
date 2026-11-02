@@ -160,6 +160,43 @@ const step = (s) => console.log(`- ${s}`);
   r = await api(token, 'POST', '/api/v1/webhooks', { url: 'ftp://x.com' });
   assert.equal(r.json.error.code, 'invalid_url');
 
+  step('billing: price per part, allowed debt, payments, refused without money, no charge on provider error');
+  r = await admin('POST', '/mainadmin/tokens', {
+    name: 'Bill', providers: [txtId, tplProvId], default_provider_id: txtId, [`price_${txtId}`]: '100', [`price_${tplProvId}`]: '50', credit_limit: '-150',
+  });
+  const bill = /id="tk">([^<]+)</.exec(r.text)[1];
+  const billId = [...(await admin('GET', '/mainadmin/tokens')).text.matchAll(/href="\/mainadmin\/tokens\/(\d+)"/g)].pop()[1];
+  r = await api(bill, 'GET', '/api/v1/balance');
+  assert.deepEqual([r.json.balance, r.json.allowed_debt, r.json.available], [0, 150, 150]);
+  assert.equal(r.json.prices.find((p) => p.provider === 'txt').price_per_part, 100);
+  r = await api(bill, 'POST', '/api/v1/sms/send', { to: '09120000003', text: 'hi' });
+  assert.equal(r.status, 201, JSON.stringify(r.json));
+  assert.deepEqual([r.json.message.parts, r.json.message.cost], [1, 100]);
+  r = await api(bill, 'POST', '/api/v1/sms/send', { to: '09120000003', text: 'hi' }); // -200 < -150
+  assert.equal(r.status, 402);
+  assert.equal(r.json.error.code, 'insufficient_balance');
+  assert.equal(r.json.error.details.balance, -100);
+  assert.equal(r.json.error.details.message.status, 'failed');
+  r = await admin('POST', `/mainadmin/tokens/${billId}/transactions`, { kind: 'payment', amount: '-5' });
+  assert.match(r.location, /err=/, 'negative payment must be refused');
+  r = await admin('POST', `/mainadmin/tokens/${billId}/transactions`, { kind: 'payment', amount: '1,000', note: 'receipt 1' });
+  assert.match(r.location, /ok=/);
+  r = await api(bill, 'POST', '/api/v1/sms/send', { to: '09120000003', text: 'a'.repeat(200) }); // + Persian footer = UCS-2, 206 -> 4 parts
+  assert.deepEqual([r.json.message.parts, r.json.message.cost], [4, 400]);
+  r = await api(bill, 'POST', '/api/v1/sms/send', { to: '09120000003', provider: 'tpl', template: 'verify', params: { code: '1', minutes: '2' } });
+  assert.deepEqual([r.json.message.parts, r.json.message.cost], [1, 50]);
+  await admin('POST', `/mainadmin/providers/${txtId}`, { name: 'Text provider', enabled: '1', s_fail_if_to_contains: '0000' });
+  r = await api(bill, 'POST', '/api/v1/sms/send', { to: '09120000000', text: 'x' });
+  assert.equal(r.status, 502);
+  assert.equal(r.json.error.details.message.cost, null);
+  await admin('POST', `/mainadmin/providers/${txtId}`, { name: 'Text provider', enabled: '1', s_fail_if_to_contains: '' });
+  r = await api(bill, 'GET', '/api/v1/transactions');
+  assert.deepEqual(r.json.transactions.map((t) => t.kind), ['sms', 'sms', 'payment', 'sms']);
+  assert.equal(r.json.transactions[0].balance_after, 450);
+  assert.equal((await api(bill, 'GET', '/api/v1/balance')).json.balance, 450);
+  r = await admin('GET', '/mainadmin/tokens'); // no prices on the first key -> billing off (no API call: its rate limit is nearly used)
+  assert.ok(r.text.includes('billing off'));
+
   step('rotate: old token dies, new one works');
   const tokId = /href="\/mainadmin\/tokens\/(\d+)"/.exec((await admin('GET', '/mainadmin/tokens')).text)[1];
   r = await admin('POST', `/mainadmin/tokens/${tokId}/rotate`);

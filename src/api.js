@@ -5,6 +5,7 @@ const providers = require('./providers');
 const ratelimit = require('./ratelimit');
 const sms = require('./sms');
 const webhooks = require('./webhooks');
+const billing = require('./billing');
 const { ApiError, sha256, randomHex, readBody, parseBody } = require('./util');
 
 // Failed-auth throttle per IP (memory only): 30 bad tokens a minute -> 429.
@@ -105,6 +106,23 @@ const routes = [
       name: token.name,
       default_provider: sms.effectiveDefault(token, allowed, globalDefault)?.slug ?? null,
       providers: allowed.map((p) => p.slug),
+      balance: await billing.summary(token),
+    };
+  }],
+
+  // Money: balance, allowed debt, price per part for each provider (null = free). See billing.js
+  ['GET', /^\/api\/v1\/balance$/, async ({ token }) => billing.summary(token)],
+
+  ['GET', /^\/api\/v1\/transactions$/, async ({ token, query }) => {
+    const limit = clampInt(query.limit, 50, 1, 200);
+    const before = query.before_id ? clampInt(query.before_id, null, 1, Number.MAX_SAFE_INTEGER) : null;
+    const rows = await billing.history(token.id, { limit, beforeId: before });
+    return {
+      currency: billing.CURRENCY,
+      transactions: rows.map((t) => ({
+        id: t.id, kind: t.kind, amount: t.amount, balance_after: t.balance_after, note: t.note || null,
+        message_id: t.message_id, parts: t.parts, price_per_part: t.unit_price, created_at: t.created_at,
+      })),
     };
   }],
 
