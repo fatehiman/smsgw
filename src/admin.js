@@ -7,6 +7,7 @@ const settings = require('./settings');
 const webhooks = require('./webhooks');
 const blacklist = require('./blacklist');
 const billing = require('./billing');
+const lowbalance = require('./lowbalance');
 const ui = require('./admin-ui');
 const {
   ApiError, sha256, hmac, randomToken, randomHex, safeEqual, verifyPassword, readBody, parseBody,
@@ -570,6 +571,46 @@ route('POST', /^\/mainadmin\/limits$/, async (ctx) => {
   for (const [k, v] of Object.entries(vals)) await settings.set(k, v);
   await settings.set('tz_offset_min', tz);
   return back('/mainadmin/limits', 'Saved', null);
+});
+
+// --- low provider-balance alert (src/lowbalance.js)
+route('GET', /^\/mainadmin\/alerts$/, async (ctx) => {
+  const c = await lowbalance.getConfig();
+  const provs = (await q('SELECT id, slug, driver FROM providers ORDER BY id')).rows;
+  const s = await settings.all();
+  const rows = await Promise.all(provs.map(async (p) => {
+    const can = typeof providers.get(p.driver)?.balance === 'function';
+    const b = await lowbalance.lastBalance(p.id);
+    const at = Number(s[`alert_at_${p.id}`] || 0);
+    const low = b && c.threshold > 0 && b.amount < c.threshold;
+    return `<tr><td class="mono">${esc(p.slug)}</td><td>${can ? badge('can read balance', 'ok') : badge('no balance API', '')}</td>
+      <td>${b ? `${fmtMoney(b.amount)}${b.remaining_sms != null ? ` <span class="muted">(${fmtMoney(b.remaining_sms)} SMS)</span>` : ''} ${low ? badge('low', 'bad') : ''}
+      <div class="help">checked ${fmtTime(new Date(b.at))} UTC</div>` : '<span class="muted">not checked yet</span>'}</td>
+      <td class="muted">${at ? `${fmtTime(new Date(at))} UTC` : '—'}</td></tr>`;
+  }));
+  return page(ctx, 'Alerts', `<h1>Low balance alert</h1><form class="card" method="post" action="/mainadmin/alerts">${hidden(ctx)}
+    <p class="muted">After every accepted SMS the gateway reads the credit of <b>our account at the provider</b> (in the background).
+    If it is below the threshold, an alert SMS is sent to the number below through the same provider.
+    Then it repeats at most every N hours while the balance stays low. Only for providers that can tell their balance.</p>
+    <label for="alert_phone">Alert phone number</label><input id="alert_phone" name="alert_phone" value="${esc(c.phone)}" placeholder="09031238058" style="max-width:220px">
+    <label for="alert_threshold">Threshold (in the provider's balance unit)</label><input id="alert_threshold" type="number" min="0" name="alert_threshold" value="${c.threshold}" style="max-width:180px">
+    <div class="help">Alert when the provider balance is below this. 0 = alerts off.</div>
+    <label for="alert_repeat_hours">Repeat the alert every (hours)</label><input id="alert_repeat_hours" type="number" min="1" max="720" name="alert_repeat_hours" value="${c.repeatHours}" style="max-width:140px">
+    <button class="btn txt-btn" type="submit">Save</button></form>
+    <div class="card"><table><tr><th>Provider</th><th>Support</th><th>Last known balance</th><th>Last alert</th></tr>${rows.join('') || '<tr><td colspan="4" class="muted">No providers.</td></tr>'}</table></div>`, 'alerts');
+});
+
+route('POST', /^\/mainadmin\/alerts$/, async (ctx) => {
+  const phone = String(ctx.body.alert_phone || '').replace(/[\s-]/g, '');
+  if (!/^\+?\d{5,20}$/.test(phone)) throw new ApiError(422, 'invalid', 'Alert phone must be 5-20 digits');
+  const th = Number(ctx.body.alert_threshold);
+  if (!Number.isFinite(th) || th < 0) throw new ApiError(422, 'invalid', 'Threshold must be 0 or more');
+  const hrs = Number(ctx.body.alert_repeat_hours);
+  if (!Number.isInteger(hrs) || hrs < 1 || hrs > 720) throw new ApiError(422, 'invalid', 'Repeat must be 1-720 hours');
+  await settings.set('alert_phone', phone);
+  await settings.set('alert_threshold', th);
+  await settings.set('alert_repeat_hours', hrs);
+  return back('/mainadmin/alerts', 'Saved', null);
 });
 
 // --- messages

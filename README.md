@@ -31,7 +31,24 @@ Docs: [API.md](API.md) (for callers) · [DEPLOY.md](DEPLOY.md) (server) · this 
   **Balance and payments**: the balance, a form to save a payment or a correction, and all transactions. A token is shown **once**; only its SHA-256 hash is stored.
 - **Rate limits**: global defaults and the time zone offset that decides when "00:00" is.
 - **Messages**: log of sent and received SMS.
+- **Alerts**: low provider-balance alert. See below.
 - **Blacklist**: numbers that sent `11` (no SMS goes to them until `12`) and the log of 11 / 12. See below.
+
+## Low provider-balance alert (since 2026-11-08)
+
+This is the credit of **our account at the SMS provider**, not the balance of an API key.
+
+- After every SMS the provider accepts, the gateway asks the provider for its balance, in the background (the API reply is not delayed).
+  A driver can support this with an optional `async balance(ctx)` that returns `{ amount, remaining_sms? }`. Today only `mihan-sms` does (SOAP `accountInfo`).
+  Other drivers are skipped. Only text providers can send the alert.
+- If `amount < threshold`, one alert SMS (Persian text) goes to the alert number through the same provider.
+  While the balance stays low it repeats at most every N hours. When the balance is above the threshold again, the next drop alerts at once.
+  If the alert cannot be sent, it is tried again after the next SMS.
+- Settings (admin page **Alerts**, table `settings`): `alert_phone` (default `09031238058`), `alert_threshold` (default `0` = **off**; the unit is the
+  provider's balance unit), `alert_repeat_hours` (default 24). The page also shows the last known balance and last alert per provider.
+  State per provider is in `settings` too: `bal_<id>`, `alert_at_<id>`. No migration.
+- The alert is sent straight through the driver: no billing, no blacklist check, no footer, not saved in `messages`.
+- Code: `src/lowbalance.js`, test: `test/lowbalance.test.js`.
 
 ## Opt-out and the blacklist (fixed rules, since 2026-11-01)
 
@@ -105,6 +122,7 @@ src/api.js             public API routes
 src/admin.js           admin panel (+ admin-ui.js: HTML/CSS helpers)
 src/sms.js             provider choice + type validation + sending
 src/billing.js         SMS parts, prices, balance, transactions
+src/lowbalance.js      low provider-balance alert
 src/inbound.js         /hook endpoint, who-owns-this-SMS logic, polling
 src/webhooks.js        webhook queue, signing, retries, URL guard
 src/ratelimit.js       fixed-window counters in PostgreSQL
@@ -151,7 +169,7 @@ module.exports = {
 ```
 
 Included drivers: `generic-http` (text) and `generic-http-template` (template) — connect most simple HTTP SMS APIs
-from the admin panel with URL/body templates, no code; `kavenegar-lookup` (template); `mihan-sms` (MihanSMSCenter, text, SOAP; send, receive by push or pull); `mock-text` and
+from the admin panel with URL/body templates, no code; `kavenegar-lookup` (template); `mihan-sms` (MihanSMSCenter, text, SOAP; send, receive by push or pull, balance); `mock-text` and
 `mock-template` (send nothing; for testing). Files starting with `_` in `src/providers/` are shared helpers.
 
 ## Development

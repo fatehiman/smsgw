@@ -91,6 +91,15 @@ module.exports = {
     return { providerMessageId: field(r.xml, 'identifier'), status: 'sent' };
   },
 
+  // Credit of our account (accountInfo). Used by the low-balance alert (src/lowbalance.js).
+  async balance(ctx) {
+    const r = await call(ctx.settings, 'accountInfo', {});
+    const amount = Number(field(r.xml, 'balance'));
+    if (r.status !== 0 || !Number.isFinite(amount)) throw new ProviderError(`Mihan error ${r.status}: ${r.message}`);
+    const rem = Number(field(r.xml, 'remaining_sms'));
+    return { amount, remaining_sms: Number.isFinite(rem) ? rem : null };
+  },
+
   inbound: {
     // Mihan POSTs to, from, message, timestamp. verifyReceive stops forged posts (and marks the SMS read).
     async parse(req, ctx) {

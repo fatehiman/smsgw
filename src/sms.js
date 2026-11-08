@@ -4,6 +4,7 @@ const providers = require('./providers');
 const webhooks = require('./webhooks');
 const blacklist = require('./blacklist');
 const billing = require('./billing');
+const lowbalance = require('./lowbalance');
 const { ApiError, normalizePhone } = require('./util');
 
 const MAX_TEXT = 2000;
@@ -156,6 +157,7 @@ async function sendSms(token, body) {
       `UPDATE messages SET status=$2, provider_message_id=$3, updated_at=now() WHERE id=$1`,
       [row.id, r.status || 'sent', r.providerMessageId || null],
     );
+    lowbalance.check(provider, driver).catch(() => {}); // background: alert if our credit at the provider is low
   } catch (e) {
     if (charged) await billing.release(token.id, row.id).catch((x) => console.error('billing release:', x.message));
     await q(`UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1`, [row.id, String(e.message).slice(0, 500)]);
