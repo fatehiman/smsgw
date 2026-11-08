@@ -9,7 +9,8 @@ Group=www-data
 WorkingDirectory=/var/www/smsgw
 EnvironmentFile=/etc/smsgw.env
 Environment=NODE_ENV=production
-Environment=NODE_OPTIONS=--dns-result-order=ipv4first --no-network-family-autoselection
+# quoted: without quotes systemd drops the second flag
+Environment="NODE_OPTIONS=--dns-result-order=ipv4first --no-network-family-autoselection"
 ExecStart=/usr/local/bin/node src/server.js
 Restart=always
 RestartSec=3
