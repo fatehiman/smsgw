@@ -26,7 +26,7 @@ Many wrong tokens from one IP also give `429` (`too_many_failures`).
 | GET | `/usage` | Your limits and how much this IP has used |
 | GET | `/providers` | Allowed providers: `type` (`text`/`template`), `is_default`, templates |
 | GET | `/providers/{slug}/templates` | Templates of a template provider |
-| POST | `/sms/send` (alias `POST /sms`) | Send an SMS |
+| POST | `/sms/send` (alias `POST /sms`) | Queue an SMS (sent in the background) |
 | GET | `/sms` | Sent messages. `limit` (≤200), `before_id`, `status` |
 | GET | `/sms/{id}` | One sent message and its status |
 | GET | `/inbox` | Received SMS. `limit`, `after_id`, `unread=1`, `ack=1` (mark returned ones as read) |
@@ -66,17 +66,36 @@ curl -X POST https://smsgw.kimiasoft.ir/api/v1/sms/send \
 | `provider` | Optional provider short name. Leave out to use your key's default provider. |
 | `reference` | Optional string (≤100), returned with the message. Use it as your own ID. |
 
-Reply `201`:
+Reply `201` — **the SMS is queued**, not sent yet:
 
 ```json
 {"ok":true,"message":{"id":42,"direction":"out","provider":"txt","to":"09121234567","text":"Hello",
- "status":"sent","provider_message_id":"123","error":null,"reference":null,"parts":1,"cost":150,
+ "status":"queued","provider_message_id":null,"error":null,"reference":null,"parts":1,"cost":150,
+ "attempts":0,"next_try_at":"2026-11-01T10:00:00.000Z",
  "created_at":"2026-11-01T10:00:00.000Z","updated_at":"2026-11-01T10:00:00.000Z"}}
 ```
 
-Status: `queued` → `sent` → `delivered` (if the provider reports it) or `failed`.
+`201` means: all checks passed (token, provider, fields, blacklist, balance) and the SMS is in our queue.
+The reply comes at once; a slow provider does not delay it. `id` is **our** message ID: keep it and use it
+with `GET /sms/{id}` (or the `sms.status` webhook) to learn what happened.
 
-`parts` = number of SMS parts. `cost` = what this SMS cost in IRT (`null` = not charged: free provider, or the send failed).
+### The queue
+
+- A background worker sends queued SMS, one at a time, usually within a few seconds.
+- **Retry.** A temporary provider problem (network error, timeout, provider busy) is tried again after
+  30 s, 2 min, 5 min, 15 min and 30 min (6 tries in about 52 min). Meanwhile the other SMS are sent normally.
+  While it waits, `status` stays `queued`, `attempts` counts the tries, `next_try_at` is the next try and
+  `error` holds the last error.
+- **Failed.** A clear refusal (bad number, …) fails at once. An SMS that is not sent **60 minutes** after it was
+  queued is `failed`. A `failed` SMS costs nothing (`cost` becomes `null`, the money comes back).
+- A retry can rarely make a duplicate SMS (when the provider got the first try but its answer was lost).
+  Providers that can detect this (Mihan) do not send it twice.
+
+Status: `queued` → `sending` (a few seconds) → `sent` → `delivered` (if the provider reports it), or `failed`.
+`provider_message_id` is filled when the provider accepts the SMS.
+
+`parts` = number of SMS parts. `cost` = what this SMS costs in IRT (`null` = not charged: free provider, or the send failed).
+The money is held when the SMS is queued.
 
 ### Errors
 
@@ -94,9 +113,12 @@ Status: `queued` → `sent` → `delivered` (if the provider reports it) or `fai
 | 402 | `insufficient_balance` | Not enough money. Nothing is sent. `details`: `cost`, `parts`, `price_per_part`, `balance`, `allowed_debt`, `available`, `message` (saved as `failed`) |
 | 403 | `number_blacklisted` | The recipient sent `11` (opt-out): nothing is sent to it, from any key, until it sends `12`. The message is saved as `failed` (`details.message`) |
 | 429 | `rate_limited` | See Rate limits |
-| 502 | `provider_error`, `provider_rejected`, `network_error` | The provider failed. The message is saved as `failed` and returned in `details.message` |
+| 503 | `provider_unavailable` | The provider's driver is not installed on the gateway |
 
 These checks also apply when the default provider is used.
+
+Provider errors are **not** returned by `POST /sms/send` any more (since 2026-11-08): the SMS is queued and a provider
+error shows later in `GET /sms/{id}` (`status`, `error`) and in the `sms.status` webhook.
 
 ## Balance and prices
 
@@ -117,8 +139,9 @@ curl -s https://smsgw.kimiasoft.ir/api/v1/balance -H "Authorization: Bearer $TOK
   153 per part when longer. Any other character (Persian, emoji) = 70 for 1 part, 67 per part. The footer `\nلغو11` is
   part of the text, so a text SMS is always counted as Persian. A template SMS is counted from the template text the admin saved
   (no saved text = 1 part).
-- The SMS is charged when the provider **accepts** it. If the provider refuses it (`502`), nothing is charged.
-  A later `failed` delivery report does not give money back.
+- The money is held when the SMS is queued. If the SMS ends `failed` in the queue (provider refused it, or no
+  success in 60 min), the money comes back. A later `failed` **delivery report** (after the provider accepted it)
+  does not give money back.
 - A send is refused with `402 insufficient_balance` if `balance - cost` would go below `-allowed_debt`.
   Example: allowed debt 10000 → the balance may go down to −10,000; the next SMS is refused.
 
@@ -141,7 +164,8 @@ curl -s https://smsgw.kimiasoft.ir/api/v1/balance -H "Authorization: Bearer $TOK
  "from":"09129999999","to":"3000111","text":"hello","status":"received","read":false,...}}
 ```
 
-`sms.status` has the same shape with the outgoing message (new `status`). Headers:
+`sms.status` has the same shape with the outgoing message (new `status`). It is sent when the queue sends the SMS
+(`sent`) or gives up (`failed`), and when the provider reports `delivered` / `failed`. Headers:
 `X-SMSGW-Event`, `X-SMSGW-Timestamp`, `X-SMSGW-Signature: sha256=<hex>`.
 Check it: `hex(HMAC_SHA256(secret, timestamp + "." + rawBody))`. Answer with any `2xx`.
 Failed deliveries are retried after 10 s, 1 min, 5 min, 30 min and 2 h.

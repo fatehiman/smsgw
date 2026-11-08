@@ -144,12 +144,14 @@ route('GET', /^\/mainadmin$/, async (ctx) => {
     (SELECT count(*) FROM messages WHERE direction='out' AND created_at > now() - interval '24 hours')::int AS sent,
     (SELECT count(*) FROM messages WHERE direction='out' AND status='failed' AND created_at > now() - interval '24 hours')::int AS failed,
     (SELECT count(*) FROM messages WHERE direction='in' AND created_at > now() - interval '24 hours')::int AS received,
+    (SELECT count(*) FROM messages WHERE direction='out' AND status IN ('queued','sending'))::int AS queued,
     (SELECT count(*) FROM webhook_deliveries WHERE status='pending')::int AS pending`)).rows[0];
   const rows = (await q(messageSql('', 10), [])).rows;
   return page(ctx, 'Dashboard', `<h1>Dashboard</h1><div class="grid">
     <div class="stat"><b>${c.providers}</b><span>providers</span></div><div class="stat"><b>${c.tokens}</b><span>API tokens</span></div>
     <div class="stat"><b>${c.sent}</b><span>sent, 24 h</span></div><div class="stat"><b>${c.failed}</b><span>failed, 24 h</span></div>
-    <div class="stat"><b>${c.received}</b><span>received, 24 h</span></div><div class="stat"><b>${c.pending}</b><span>webhooks waiting</span></div></div>
+    <div class="stat"><b>${c.received}</b><span>received, 24 h</span></div><div class="stat"><b>${c.queued}</b><span>SMS in queue</span></div>
+    <div class="stat"><b>${c.pending}</b><span>webhooks waiting</span></div></div>
     <h2>Latest messages</h2><div class="card">${messageTable(rows)}</div>`, 'home');
 });
 
@@ -633,11 +635,13 @@ function messageSql(where, limit) {
 }
 
 function messageTable(rows) {
-  const st = { sent: 'info', delivered: 'ok', failed: 'bad', received: 'ok', queued: 'warn' };
+  const st = { sent: 'info', delivered: 'ok', failed: 'bad', received: 'ok', queued: 'warn', sending: 'warn' };
+  const tries = (m) => (m.direction === 'out' && m.attempts > 1 ? `<div class="help">tries: ${m.attempts}</div>` : '')
+    + (m.status === 'queued' && m.next_at && m.attempts > 0 ? `<div class="help">next try ${fmtTime(m.next_at)}</div>` : '');
   const trs = rows.map((m) => `<tr><td class="muted">${m.id}</td><td class="muted">${fmtTime(m.created_at)}</td>
     <td>${m.direction === 'out' ? '→' : '←'}</td><td class="mono">${esc(m.peer)}</td><td>${esc(m.token_name || '—')}</td><td class="mono">${esc(m.provider_slug || '—')}</td>
     <td>${esc(m.body ?? (m.template_code ? `[${m.template_code}] ${JSON.stringify(m.params)}` : ''))}</td>
-    <td>${badge(m.status, st[m.status] || '')}${m.error ? `<div class="help">${esc(m.error)}</div>` : ''}</td>
+    <td>${badge(m.status, st[m.status] || '')}${m.error ? `<div class="help">${esc(m.error)}</div>` : ''}${tries(m)}</td>
     <td class="mono muted">${m.parts ?? ''}${m.cost != null ? ` · ${fmtMoney(m.cost)}` : ''}</td></tr>`).join('');
   return `<table><tr><th>#</th><th>Time (UTC)</th><th></th><th>Number</th><th>Key</th><th>Provider</th><th>Content</th><th>Status</th><th title="SMS parts · cost in ${CURRENCY}">Parts · ${CURRENCY}</th></tr>${trs || '<tr><td colspan="9" class="muted">No messages.</td></tr>'}</table>`;
 }
@@ -656,7 +660,7 @@ route('GET', /^\/mainadmin\/messages$/, async (ctx) => {
   const next = rows.length === 100 ? `<p><a href="?${new URLSearchParams({ ...Object.fromEntries(sp), before: rows[rows.length - 1].id })}">Older messages →</a></p>` : '';
   return page(ctx, 'Messages', `<h1>Messages</h1><form method="get" class="card" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     ${sel('dir', sp.get('dir'), [['out', 'sent'], ['in', 'received']])}${sel('token', sp.get('token'), tokens.map((t) => [t.id, t.name]))}
-    ${sel('status', sp.get('status'), ['queued', 'sent', 'delivered', 'failed', 'received'].map((s) => [s, s]))}
+    ${sel('status', sp.get('status'), ['queued', 'sending', 'sent', 'delivered', 'failed', 'received'].map((s) => [s, s]))}
     <button class="btn txt-btn" style="margin:0" type="submit">Filter</button></form><div class="card">${messageTable(rows)}</div>${next}`, 'messages');
 });
 

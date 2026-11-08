@@ -40,6 +40,17 @@ async function api(token, method, path, body) {
 
 const step = (s) => console.log(`- ${s}`);
 
+// Send is queued (src/outbox.js); wait until the worker has finished with it.
+async function waitDone(token, id, ms = 25000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const m = (await api(token, 'GET', `/api/v1/sms/${id}`)).json.message;
+    if (!['queued', 'sending'].includes(m.status)) return m;
+    if (Date.now() > end) throw new Error(`message ${id} is still ${m.status}`);
+    await new Promise((res) => { setTimeout(res, 500); });
+  }
+}
+
 (async () => {
   step('everything unknown is 404');
   for (const p of ['/wp-admin', '/.env', '/wp-login.php', '/admin', '/api', '/api/v2/x']) {
@@ -58,6 +69,8 @@ const step = (s) => console.log(`- ${s}`);
   assert.ok(r.text.includes('Dashboard') && csrf);
   r = await admin('POST', '/mainadmin/limits', { _csrf: 'bad' });
   assert.equal(r.status, 403, 'bad CSRF must be refused');
+  // high limits for now: waiting for the send queue uses extra API calls (the rate-limit step sets 20/min again)
+  await admin('POST', '/mainadmin/limits', { limit_minute: 1000, limit_hour: 1000, limit_day: 1000, tz_offset_min: 210 });
 
   step('create providers (text + template) and a template');
   r = await admin('POST', '/mainadmin/providers', { driver: 'mock-text', slug: 'txt', name: 'Text provider' });
@@ -92,6 +105,12 @@ const step = (s) => console.log(`- ${s}`);
   r = await api(token, 'POST', '/api/v1/sms/send', { to: '09120000001', text: 'hello' });
   assert.equal(r.status, 201, JSON.stringify(r.json));
   assert.equal(r.json.message.provider, 'txt');
+  assert.equal(r.json.message.status, 'queued', 'the API only queues');
+  assert.equal(r.json.message.provider_message_id, null);
+  let done = await waitDone(token, r.json.message.id);
+  assert.equal(done.status, 'sent');
+  assert.equal(done.attempts, 1);
+  assert.match(done.provider_message_id, /^mock-/);
   r = await api(token, 'POST', '/api/v1/sms/send', { to: '09120000001', template: 'verify', params: { code: '1', minutes: '2' } });
   assert.equal(r.json.error.code, 'template_not_supported'); // default provider is the text one
   r = await api(token, 'POST', '/api/v1/sms/send', { to: '09120000001', text: 'x', provider: 'tpl' });
@@ -107,6 +126,7 @@ const step = (s) => console.log(`- ${s}`);
   r = await api(token, 'POST', '/api/v1/sms/send', { to: '09120000001', provider: 'tpl', template: 'verify', params: { code: '1', minutes: 2 } });
   assert.equal(r.status, 201, JSON.stringify(r.json));
   assert.deepEqual(r.json.message.params, { code: '1', minutes: '2' });
+  assert.equal((await waitDone(token, r.json.message.id)).status, 'sent');
   r = await api(token, 'POST', '/api/v1/sms/send', { to: '09120000001', text: 'x', provider: 'unknown' });
   assert.equal(r.json.error.code, 'provider_not_allowed');
   r = await api(token, 'POST', '/api/v1/sms/send', { to: 'abc', text: 'x' });
@@ -187,9 +207,32 @@ const step = (s) => console.log(`- ${s}`);
   assert.deepEqual([r.json.message.parts, r.json.message.cost], [1, 50]);
   await admin('POST', `/mainadmin/providers/${txtId}`, { name: 'Text provider', enabled: '1', s_fail_if_to_contains: '0000' });
   r = await api(bill, 'POST', '/api/v1/sms/send', { to: '09120000000', text: 'x' });
-  assert.equal(r.status, 502);
-  assert.equal(r.json.error.details.message.cost, null);
+  assert.equal(r.status, 201, 'queued; the provider error comes later');
+  assert.equal(r.json.message.cost, 100, 'money is held while queued');
+  done = await waitDone(bill, r.json.message.id);
+  assert.equal(done.status, 'failed');
+  assert.equal(done.cost, null, 'money given back');
   await admin('POST', `/mainadmin/providers/${txtId}`, { name: 'Text provider', enabled: '1', s_fail_if_to_contains: '' });
+
+  step('queue: a temporary error is retried later and does not block the next SMS');
+  await admin('POST', `/mainadmin/providers/${txtId}`, { name: 'Text provider', enabled: '1', s_temp_fail_if_to_contains: '7777' });
+  const stuck = (await api(token, 'POST', '/api/v1/sms/send', { to: '09127777777', text: 'stuck' })).json.message.id;
+  for (let i = 0; i < 40; i++) {
+    const m = (await api(token, 'GET', `/api/v1/sms/${stuck}`)).json.message;
+    if (m.attempts >= 1 && m.status === 'queued') break;
+    await new Promise((res) => { setTimeout(res, 250); });
+  }
+  let sm = (await api(token, 'GET', `/api/v1/sms/${stuck}`)).json.message;
+  assert.equal(sm.status, 'queued', JSON.stringify(sm));
+  assert.equal(sm.attempts, 1);
+  assert.match(sm.error, /try 1\/6 failed/);
+  const wait = (new Date(sm.next_try_at) - new Date(sm.updated_at)) / 1000;
+  assert.ok(wait > 25 && wait < 35, `first retry after ~30 s, got ${wait}`);
+  r = await api(token, 'POST', '/api/v1/sms/send', { to: '09121111111', text: 'next' });
+  assert.equal((await waitDone(token, r.json.message.id)).status, 'sent', 'the stuck SMS must not block this one');
+  await admin('POST', `/mainadmin/providers/${txtId}`, { name: 'Text provider', enabled: '1', s_temp_fail_if_to_contains: '' });
+  r = await admin('GET', '/mainadmin/messages?status=queued');
+  assert.ok(r.text.includes('next try'), 'admin shows the next try');
   r = await api(bill, 'GET', '/api/v1/transactions');
   assert.deepEqual(r.json.transactions.map((t) => t.kind), ['sms', 'sms', 'payment', 'sms']);
   assert.equal(r.json.transactions[0].balance_after, 450);

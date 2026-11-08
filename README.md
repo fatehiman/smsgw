@@ -7,6 +7,7 @@ An API gateway to **send and receive SMS** through any provider. Live at `https:
 - Two provider types: **text** (any SMS text) and **template** (template ID + parameters).
 - **Billing**: price per SMS part per token and provider, a balance and an allowed debt per token, payments as transactions.
 - Per-token, per-caller-IP **rate limits** (default 20/min, 100/hour, 300/day, fixed windows).
+- **Sending queue**: the API answers at once with our own message ID; a background worker sends, with retries.
 - Receive SMS by **webhook** (we call you) or by **polling** an API endpoint.
 - Node.js 22+ (runs on 24), PostgreSQL, one npm package (`pg`). No framework.
 
@@ -34,11 +35,37 @@ Docs: [API.md](API.md) (for callers) · [DEPLOY.md](DEPLOY.md) (server) · this 
 - **Alerts**: low provider-balance alert. See below.
 - **Blacklist**: numbers that sent `11` (no SMS goes to them until `12`) and the log of 11 / 12. See below.
 
+## Sending queue (since 2026-11-08)
+
+Code: `src/outbox.js`, called from `src/sms.js` and started in `src/server.js`.
+
+- `POST /sms/send` only does the checks (token, provider, fields, blacklist, balance), holds the money, saves the
+  SMS as `queued` and answers `201` with **our** `id`. It never waits for the provider (Mihan sometimes takes > 10 s).
+- **One worker, no overlap.** A run starts every 10 s and sends due SMS one after another while it is inside a
+  **9 s budget**. The budget is soft: a send that starts at 8.9 s and takes 20 s ends the run at ~29 s; the next run
+  starts only after that. Never two runs, never two sends at the same time. A new SMS wakes an idle worker at once.
+- **Order:** `next_at`, then `id`. An SMS is taken with `UPDATE … FOR UPDATE SKIP LOCKED` and marked `sending`.
+- **Retry** only when the driver throws `ProviderError` with `retryable: true` (network error, timeout, HTTP 5xx,
+  Mihan codes 5 / 8). Waits after try 1–5: 30 s, 2 min, 5 min, 15 min, 30 min → 6 tries in ~52 min. A waiting
+  retry just has a later `next_at`, so it never blocks other SMS. Other errors fail at once.
+  Not sent 60 min after it was queued → `failed`. Columns `messages.attempts`, `messages.next_at` (migration 4).
+- **Duplicates.** A retry gets `msg.retry = true`. `mihan-sms` then sends with `check_duplicate=true`: if the first
+  try reached Mihan (answer lost by a timeout), Mihan returns its ID and does not send again. Other drivers just send
+  again (a rare duplicate is better than a lost OTP).
+- Checked again just before the send: key not deleted, provider enabled, driver installed, number not blacklisted,
+  template still there. If not → `failed`.
+- **Money:** held when queued; given back when the SMS ends `failed`.
+- **Webhook** `sms.status` on `sent` and on `failed`.
+- **Stop / crash.** On SIGTERM the worker lets the running send finish, then the process exits. An SMS left in
+  `sending` (crash) is queued again at start and sent as a retry.
+- Admin: Dashboard shows "SMS in queue"; Messages shows tries and the next try time.
+- Test a retry with the `mock-text` provider setting "Temporary failure if number contains".
+
 ## Low provider-balance alert (since 2026-11-08)
 
 This is the credit of **our account at the SMS provider**, not the balance of an API key.
 
-- After every SMS the provider accepts, the gateway asks the provider for its balance, in the background (the API reply is not delayed).
+- After every SMS the provider accepts, the queue worker asks the provider for its balance, in the background.
   A driver can support this with an optional `async balance(ctx)` that returns `{ amount, remaining_sms? }`. Today only `mihan-sms` does (SOAP `accountInfo`).
   Other drivers are skipped. Only text providers can send the alert.
 - If `amount < threshold`, one alert SMS (Persian text) goes to the alert number through the same provider.
@@ -80,9 +107,9 @@ Code: `src/billing.js`. Money is in Toman (`IRT`), 2 decimals.
   values put in (`{{name}}`, `{name}` or `%name`); no saved text = 1 part.
 - **Balance and allowed debt** on the token (`api_tokens.balance`, `credit_limit`, a positive number). A send is refused
   with `402 insufficient_balance` when `balance - cost < -credit_limit`. The message is saved as `failed`.
-- **When we charge.** The cost is taken (one atomic `UPDATE`) before the provider call. If the provider throws, the money
-  goes back and the `sms` transaction row is removed. So we charge only what the provider accepted. A later `failed`
-  delivery report gives nothing back (the provider charges us anyway).
+- **When we charge.** The cost is taken (one atomic `UPDATE`) when the SMS is queued. If the SMS ends `failed` in the
+  queue, the money goes back and the `sms` transaction row is removed. So we charge only what the provider accepted.
+  A later `failed` delivery report gives nothing back (the provider charges us anyway).
 - **Transactions** (`transactions` table): `payment` (admin, > 0), `adjust` (admin, + or −, note required), `sms` (charge).
   They cannot be edited or deleted. `balance = SUM(amount)` is always true; "balance after" is a running sum.
   Deleting a token deletes its transactions too.
@@ -120,7 +147,8 @@ passes the result to Node in `X-Gw-Client-IP`; Node trusts that header only from
 src/server.js          HTTP server, routing, background loops
 src/api.js             public API routes
 src/admin.js           admin panel (+ admin-ui.js: HTML/CSS helpers)
-src/sms.js             provider choice + type validation + sending
+src/sms.js             provider choice + type validation + queueing
+src/outbox.js          sending queue worker (retries, one run at a time)
 src/billing.js         SMS parts, prices, balance, transactions
 src/lowbalance.js      low provider-balance alert
 src/inbound.js         /hook endpoint, who-owns-this-SMS logic, polling
@@ -150,8 +178,10 @@ module.exports = {
     { key: 'api_key', label: 'API key', type: 'password', required: true },
   ],
 
-  // msg (text):     { to, text }
-  // msg (template): { to, template, params, paramList }   paramList = values in template order
+  // msg (text):     { to, text, retry }
+  // msg (template): { to, template, params, paramList, retry }   paramList = values in template order
+  // retry = true when an earlier try failed: avoid a duplicate if the provider can (see Sending queue).
+  // Throw ProviderError(msg, { retryable: true }) for temporary errors; the queue tries again later.
   async send(ctx, msg) {            // ctx.settings = this provider's saved settings
     const r = await request('https://api.example.com/send', { method: 'POST', body: '...' });
     if (r.status !== 200) throw new ProviderError(`HTTP ${r.status}`);   // -> message becomes "failed"

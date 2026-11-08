@@ -82,13 +82,20 @@ Add `"reference":"order-1234"`. It comes back in the result and in status checks
 
 ### Reply
 
+The reply comes **at once**. The SMS is put in a queue and sent in the background, usually within a few seconds.
+HTTP `201` = all checks passed and the SMS is in the queue.
+
 ```json
 {"ok":true,"message":{"id":42,"direction":"out","provider":"mihan-main","to":"09121234567",
- "text":"Your order #1234 was shipped.","status":"sent","provider_message_id":"98765",
- "error":null,"reference":"order-1234","created_at":"2026-11-01T10:00:00.000Z","updated_at":"2026-11-01T10:00:00.000Z"}}
+ "text":"Your order #1234 was shipped.","status":"queued","provider_message_id":null,
+ "error":null,"reference":"order-1234","attempts":0,"created_at":"2026-11-01T10:00:00.000Z","updated_at":"2026-11-01T10:00:00.000Z"}}
 ```
 
-Message status: `queued` → `sent` → `delivered` (only if the provider tells us) or `failed`.
+- `id` is **our** message ID. Save it. Use it later to check the message (section 5) or match the `sms.status` webhook.
+- Message status: `queued` → `sending` → `sent` → `delivered` (only if the provider tells us), or `failed`.
+- If the provider has a temporary problem, the gateway tries again after 30 s, 2 min, 5 min, 15 min and 30 min.
+  Other SMS are not blocked by it. If the SMS is not sent within **60 minutes**, it becomes `failed` and you pay nothing.
+- **Do not send the same SMS again** just because it is still `queued`. The gateway retries for you.
 
 **Footer and opt-out (fixed rules).** The gateway adds a line break and `لغو11` to the end of every **text** SMS. If the
 person answers `11`, the number goes on a blacklist and every later send to it (from any key) fails with HTTP `403`
@@ -216,7 +223,7 @@ curl -s $BASE/balance -H "Authorization: Bearer $TOKEN"
 - **Parts.** A Persian SMS: up to 70 characters = 1 part; longer = 67 characters per part. Every text SMS gets the
   footer `لغو11` on a new line (6 characters), so count it too. Example: 65 characters + footer = 71 → **2 parts**.
 - The reply of every send has `parts` and `cost`.
-- You pay only when the provider **accepts** the SMS. If the provider fails (`502`), you pay nothing.
+- The money is held when the SMS is queued. If the SMS ends `failed` in the queue, the money comes back.
 - When the money is not enough, the send fails with `402 insufficient_balance`. Nothing is sent. Ask the admin to add a payment.
 - History of payments and charges: `GET $BASE/transactions` (newest first, `balance_after` on each row).
 
@@ -242,10 +249,10 @@ Errors look like this:
 | `insufficient_balance` (402) | Not enough balance. Nothing was sent. `details` has `cost`, `balance`, `available`. Ask the admin for a payment. |
 | `number_blacklisted` (403) | The recipient sent `11` (opt-out). Do not retry; it works again only after they send `12`. |
 | `rate_limited` (429) | Wait `Retry-After` seconds. |
-| `provider_error`, `provider_rejected`, `network_error` (502) | The provider failed (for example no credit). The message is saved as `failed`; see `details.message`. |
 
-A `502` can be temporary. Do not blindly resend if you are not sure: look at `GET /sms?status=failed`,
-or use `reference` to avoid sending the same SMS twice.
+Provider errors do not come back from the send call: the SMS is already queued. If the provider fails, the message
+becomes `failed` later, with the reason in `error`. Check it with `GET /sms/{id}`, `GET /sms?status=failed` or the
+`sms.status` webhook.
 
 ## 10. Examples in code
 

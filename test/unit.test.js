@@ -115,3 +115,28 @@ test('billing: template body is filled and counted', () => {
   assert.equal(templateParts('', { code: '1' }), 1);
   assert.equal(templateParts('کد {code}', { code: 'x'.repeat(100) }), 2);
 });
+
+test('outbox retry: 6 tries with 30s/2m/5m/15m/30m waits, all inside 60 min', () => {
+  const { afterFailure, RETRY_SEC, MAX_TRIES, MAX_AGE_MIN } = require('../src/outbox');
+  assert.equal(MAX_TRIES, 6);
+  const t0 = Date.UTC(2026, 10, 8, 10, 0, 0);
+  let now = t0;
+  for (let attempt = 1; attempt < MAX_TRIES; attempt++) {
+    const d = afterFailure(attempt, true, t0, now);
+    assert.equal(d.retry, true, `try ${attempt}`);
+    assert.equal(d.nextAt - now, RETRY_SEC[attempt - 1] * 1000);
+    now = d.nextAt;
+  }
+  assert.ok(now - t0 <= MAX_AGE_MIN * 60000, 'last try is inside the max age');
+  assert.equal(afterFailure(MAX_TRIES, true, t0, now).retry, false);
+});
+
+test('outbox retry: not temporary = fail at once; never past the max age', () => {
+  const { afterFailure } = require('../src/outbox');
+  const t0 = Date.UTC(2026, 10, 8, 10, 0, 0);
+  assert.equal(afterFailure(1, false, t0, t0).retry, false);
+  // queue was slow: try 2 failed 59 min after queueing -> the 2 min wait would pass 60 min -> give up
+  const d = afterFailure(2, true, t0, t0 + 59 * 60000);
+  assert.equal(d.retry, false);
+  assert.match(d.reason, /60 min/);
+});

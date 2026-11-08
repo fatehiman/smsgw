@@ -3,3 +3,4 @@ node_modules/
 credentials.md
 *.log
 *.tgz
+.claude/settings.local.json

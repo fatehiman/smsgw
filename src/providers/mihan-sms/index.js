@@ -82,7 +82,9 @@ module.exports = {
     const s = ctx.settings;
     if (!s.sender) throw new ProviderError('Mihan sender number is not set', { code: 'not_configured' });
     const to = s.convert_to === 'no' ? msg.to : localNumber(msg.to);
-    const r = await call(s, 'send', { to, from: s.sender, message: msg.text, check_duplicate: false });
+    // retry (src/outbox.js): check_duplicate=true makes Mihan return the id of the first try if that one
+    // reached it (no second SMS), else it sends now. Not on the first try: a real repeat must be sent.
+    const r = await call(s, 'send', { to, from: s.sender, message: msg.text, check_duplicate: !!msg.retry });
     if (r.status !== 0) {
       throw new ProviderError(`Mihan error ${r.status}: ${r.message}`, {
         code: 'provider_rejected', retryable: [5, 8].includes(r.status),

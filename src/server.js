@@ -10,6 +10,7 @@ const inbound = require('./inbound');
 const webhooks = require('./webhooks');
 const ratelimit = require('./ratelimit');
 const blacklist = require('./blacklist');
+const outbox = require('./outbox');
 const { ApiError } = require('./util');
 
 const indexHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'));
@@ -63,11 +64,16 @@ async function main() {
   every(3600000, ratelimit.cleanup);
   every(3600000, webhooks.cleanup);
   every(3600000, blacklist.cleanup);
+  await outbox.start(); // sends queued SMS in the background (one run at a time)
   server.listen(config.port, config.host, () => console.log(`smsgw listening on ${config.host}:${config.port}`));
 }
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => server.close(() => db.pool.end().finally(() => process.exit(0))));
+  // let a send that is running finish first, so its result is saved
+  process.on(sig, () => {
+    server.close();
+    outbox.stop().finally(() => db.pool.end().finally(() => process.exit(0)));
+  });
 }
 
 if (require.main === module) {

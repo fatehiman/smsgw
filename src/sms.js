@@ -1,10 +1,9 @@
 'use strict';
 const { q } = require('./db');
 const providers = require('./providers');
-const webhooks = require('./webhooks');
 const blacklist = require('./blacklist');
 const billing = require('./billing');
-const lowbalance = require('./lowbalance');
+const outbox = require('./outbox');
 const { ApiError, normalizePhone } = require('./util');
 
 const MAX_TEXT = 2000;
@@ -128,6 +127,7 @@ async function sendSms(token, body) {
       `This number is in the blacklist (the recipient sent 11 to stop SMS) since ${listed.since.toISOString()}. No SMS is sent until it sends 12.`,
       { message: await getMessage(token.id, failed.id), since: listed.since });
   }
+  // saved with next_at NULL: the worker (src/outbox.js) cannot take it before the money is reserved
   const row = (await q(
     `INSERT INTO messages (token_id, provider_id, direction, peer, body, template_code, params, status, reference, parts)
      VALUES ($1,$2,'out',$3,$4,$5,$6,'queued',$7,$8) RETURNING id`,
@@ -151,20 +151,9 @@ async function sendSms(token, body) {
       });
   }
 
-  try {
-    const r = await driver.send({ settings: provider.settings, provider }, msg);
-    await q(
-      `UPDATE messages SET status=$2, provider_message_id=$3, updated_at=now() WHERE id=$1`,
-      [row.id, r.status || 'sent', r.providerMessageId || null],
-    );
-    lowbalance.check(provider, driver).catch(() => {}); // background: alert if our credit at the provider is low
-  } catch (e) {
-    if (charged) await billing.release(token.id, row.id).catch((x) => console.error('billing release:', x.message));
-    await q(`UPDATE messages SET status='failed', error=$2, updated_at=now() WHERE id=$1`, [row.id, String(e.message).slice(0, 500)]);
-    const m = await getMessage(token.id, row.id);
-    webhooks.enqueue(token.id, 'sms.status', m).catch(() => {});
-    throw new ApiError(502, e.code || 'provider_error', `Provider "${provider.slug}" failed: ${e.message}`, { message: m });
-  }
+  // queued: the background worker sends it (src/outbox.js). The caller gets our id now, not the provider's.
+  await q('UPDATE messages SET next_at=now() WHERE id=$1', [row.id]);
+  outbox.wake();
   return getMessage(token.id, row.id);
 }
 
@@ -181,7 +170,10 @@ function present(r) {
     provider_message_id: r.provider_message_id,
     error: r.error,
     reference: r.reference,
-    ...(r.direction === 'out' ? { parts: r.parts, cost: r.cost } : {}),
+    ...(r.direction === 'out' ? {
+      parts: r.parts, cost: r.cost, attempts: r.attempts ?? 0,
+      next_try_at: r.status === 'queued' ? r.next_at ?? null : null,
+    } : {}),
     created_at: r.created_at,
     updated_at: r.updated_at,
     ...(r.direction === 'in' ? { read: r.read_at != null } : {}),

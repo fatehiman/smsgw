@@ -170,6 +170,11 @@ const MIGRATIONS = [
    );
    CREATE INDEX transactions_token_idx ON transactions (token_id, id);
    CREATE UNIQUE INDEX transactions_message_idx ON transactions (message_id) WHERE message_id IS NOT NULL;`,
+  // 4: sending queue (src/outbox.js): tries so far and when the next try is due. Old 'queued' rows (left by a
+  //    stop during a send) get next_at = created_at, so the worker fails them as expired (and gives the money back).
+  `ALTER TABLE messages ADD COLUMN attempts int NOT NULL DEFAULT 0, ADD COLUMN next_at timestamptz;
+   UPDATE messages SET next_at = created_at WHERE direction='out' AND status IN ('queued','sending');
+   CREATE INDEX messages_outbox_idx ON messages (next_at, id) WHERE status = 'queued';`,
 ];
 
 async function migrate() {
