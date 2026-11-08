@@ -2,8 +2,11 @@
 // MihanSMSCenter (http://www.mihansmscenter.com/webservice/help), free-text provider over SOAP 1.1 (rpc/encoded).
 // Sending: method "send". Received SMS:
 //   - push: set the account's receive URL to /hook/<slug>/<secret>; each POST is checked with verifyReceive;
-//   - pull: setting "Fetch received SMS" = yes calls getNewMessages every minute (marks them read at Mihan).
-// Use only one of the two, and do not turn pull on if another system already reads this account.
+//   - pull, read-only (setting "Fetch received SMS" = yes): getMessages(fromId) every minute with a cursor
+//     (provider state lastId). Nothing is marked read at Mihan, so it is safe when the account's receive URL
+//     belongs to another system (2026-11-08: it is https://smsservice.ir/r-kiani/sms_receiver.php);
+//   - pull, mark read (= mark_read): getNewMessages every minute (marks them read at Mihan). Do not use it
+//     when another system reads this account.
 const { ProviderError } = require('../_errors');
 const { request } = require('../_http');
 
@@ -58,6 +61,32 @@ async function call(settings, op, params) {
   return { status, message: field(r.text, 'status_message') || '', xml: r.text };
 }
 
+// Read-only pull: getMessages(fromId) gives the received SMS with id > fromId and marks nothing read.
+// The cursor is state.lastId. First run (no cursor): only SMS of the last FIRST_RUN_SECONDS are taken, so
+// an old inbox is not imported. Several pages are read while a page brings new ids (max 10 pages a run).
+const FIRST_RUN_SECONDS = 2 * 3600;
+async function pollReadOnly(ctx) {
+  const state = { ...(ctx.state || {}) };
+  const first = state.lastId == null || !Number.isFinite(Number(state.lastId));
+  let lastId = first ? 0 : Number(state.lastId);
+  const minTime = first ? Math.floor(Date.now() / 1000) - FIRST_RUN_SECONDS : 0;
+  const events = [];
+  for (let page = 0; page < 10; page++) {
+    const r = await call(ctx.settings, 'getMessages', { fromId: lastId });
+    if (r.status !== 0) throw new ProviderError(`Mihan error ${r.status}: ${r.message}`);
+    const list = parseMessages(r.xml).filter((m) => Number(m.messageId) > lastId);
+    if (!list.length) break;
+    list.sort((a, b) => Number(a.messageId) - Number(b.messageId));
+    for (const m of list) {
+      if (!first || Number(m.timestamp) >= minTime) {
+        events.push({ kind: 'sms', from: m.from, to: m.to, text: m.message, providerMessageId: m.messageId });
+      }
+    }
+    lastId = Number(list[list.length - 1].messageId);
+  }
+  return { events, state: { ...state, lastId } };
+}
+
 // Mihan wants local format 09xxxxxxxxx. Anything else is sent as given.
 function localNumber(n) {
   const m = /^(?:\+98|0098|98|0)?(9\d{9})$/.exec(n);
@@ -73,8 +102,9 @@ module.exports = {
     { key: 'password', label: 'Web service password', type: 'password', required: true },
     { key: 'sender', label: 'Sender number', required: true, help: 'One of the numbers of the account, e.g. 3000250005.' },
     { key: 'convert_to', label: 'Convert numbers to 09xxxxxxxxx', type: 'select', options: ['yes', 'no'], default: 'yes', help: '+98912..., 98912... and 912... become 0912...' },
-    { key: 'poll_inbound', label: 'Fetch received SMS (getNewMessages, every minute)', type: 'select', options: ['no', 'yes'], default: 'no',
-      help: 'Marks fetched SMS as read at Mihan. Leave "no" if the receive URL is used (here or by another system).' },
+    { key: 'poll_inbound', label: 'Fetch received SMS (every minute)', type: 'select', options: ['no', 'yes', 'mark_read'], default: 'no',
+      help: 'yes = read-only (getMessages with a cursor; safe when the receive URL is used by another system). '
+        + 'mark_read = getNewMessages (marks them read at Mihan). no = only the receive URL (push) to /hook.' },
     { key: 'endpoint', label: 'Endpoint (leave empty)', default: '', help: `Default ${NS}index.php` },
   ],
 
@@ -115,17 +145,20 @@ module.exports = {
     },
 
     async poll(ctx) {
-      if (ctx.settings.poll_inbound !== 'yes') return { events: [] };
-      const r = await call(ctx.settings, 'getNewMessages', {});
-      if (r.status !== 0) throw new ProviderError(`Mihan error ${r.status}: ${r.message}`);
-      return {
-        events: parseMessages(r.xml).map((m) => ({
-          kind: 'sms', from: m.from, to: m.to, text: m.message, providerMessageId: m.messageId,
-        })),
-      };
+      const mode = ctx.settings.poll_inbound;
+      const toEvents = (list) => list.map((m) => ({
+        kind: 'sms', from: m.from, to: m.to, text: m.message, providerMessageId: m.messageId,
+      }));
+      if (mode === 'mark_read') {
+        const r = await call(ctx.settings, 'getNewMessages', {});
+        if (r.status !== 0) throw new ProviderError(`Mihan error ${r.status}: ${r.message}`);
+        return { events: toEvents(parseMessages(r.xml)) };
+      }
+      if (mode !== 'yes') return { events: [] };
+      return pollReadOnly(ctx);
     },
   },
 
   // exported for tests
-  _internal: { envelope, field, parseMessages, localNumber },
+  _internal: { envelope, field, parseMessages, localNumber, pollReadOnly },
 };

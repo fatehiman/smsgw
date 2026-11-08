@@ -140,3 +140,45 @@ test('outbox retry: not temporary = fail at once; never past the max age', () =>
   assert.equal(d.retry, false);
   assert.match(d.reason, /60 min/);
 });
+
+test('mihan: read-only pull with getMessages(fromId) and a cursor', async () => {
+  const mihan = require('../src/providers/mihan-sms');
+  const now = Math.floor(Date.now() / 1000);
+  const inbox = [ // id, timestamp
+    { id: 10, t: now - 3 * 86400 }, { id: 11, t: now - 600 }, { id: 12, t: now - 60 },
+  ];
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opt) => {
+    const op = /<ns1:(\w+)/.exec(opt.body)[1];
+    const fromId = Number(/<fromId[^>]*>(\d+)</.exec(opt.body)?.[1] ?? -1);
+    calls.push({ op, fromId });
+    const items = inbox.filter((m) => m.id > fromId).map((m) => `<item><messageId>${m.id}</messageId><to>3000</to>`
+      + `<from>+98912000000${m.id % 10}</from><message>m${m.id}</message><timestamp>${m.t}</timestamp></item>`).join('');
+    return new Response(`<SOAP-ENV:Envelope><status>0</status><count>0</count><messages>${items}</messages></SOAP-ENV:Envelope>`);
+  };
+  try {
+    const settings = { username: 'u', password: 'p', poll_inbound: 'yes' };
+    // first run: no cursor, SMS older than 2 hours are skipped, cursor = last id
+    let r = await mihan.inbound.poll({ settings, state: null });
+    assert.deepEqual(r.events.map((e) => e.providerMessageId), ['11', '12']);
+    assert.equal(r.state.lastId, 12);
+    assert.ok(calls.every((c) => c.op === 'getMessages'));
+    // next run: nothing new
+    r = await mihan.inbound.poll({ settings, state: r.state });
+    assert.deepEqual(r.events, []);
+    assert.equal(r.state.lastId, 12);
+    // a new SMS
+    inbox.push({ id: 13, t: now });
+    r = await mihan.inbound.poll({ settings, state: r.state });
+    assert.deepEqual(r.events.map((e) => [e.providerMessageId, e.text]), [['13', 'm13']]);
+    // "no" never calls Mihan; mark_read uses getNewMessages
+    calls.length = 0;
+    assert.deepEqual((await mihan.inbound.poll({ settings: { ...settings, poll_inbound: 'no' }, state: r.state })).events, []);
+    assert.equal(calls.length, 0);
+    await mihan.inbound.poll({ settings: { ...settings, poll_inbound: 'mark_read' } });
+    assert.deepEqual(calls.map((c) => c.op), ['getNewMessages']);
+  } finally {
+    global.fetch = realFetch;
+  }
+});

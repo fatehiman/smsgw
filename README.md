@@ -61,6 +61,29 @@ Code: `src/outbox.js`, called from `src/sms.js` and started in `src/server.js`.
 - Admin: Dashboard shows "SMS in queue"; Messages shows tries and the next try time.
 - Test a retry with the `mock-text` provider setting "Temporary failure if number contains".
 
+## Receiving SMS from Mihan (read-only pull, since 2026-11-08)
+
+**Incident 2026-11-08.** A client answered a booking SMS of narjes-hesari.ir with «پرداخت کردم», but the site never
+got it. The gateway had **never** received an SMS: the Mihan account's receive URL (push) is
+`https://smsservice.ir/r-kiani/sms_receiver.php` (another system, not ours), and the pull was off (`poll_inbound = no`).
+We must not take the receive URL away from that system, and `getNewMessages` marks SMS as read at Mihan, which could
+hide them from it.
+
+So the setting **"Fetch received SMS"** of a `mihan-sms` provider now has three values:
+
+| Value | What |
+|---|---|
+| `no` | no pull; only the receive URL (push) to `/hook/<slug>/<secret>`, if it points to us |
+| `yes` | **read-only pull**: every minute `getMessages(fromId)` with a cursor (`providers.state.lastId`). Marks nothing read at Mihan, so the other system keeps working. **Live value.** |
+| `mark_read` | the old pull: `getNewMessages` every minute (marks them read at Mihan). Only when no other system reads the account. |
+
+- `getMessages(fromId)` returns the SMS with id **greater than** `fromId` (checked on the live account).
+- First run (no cursor): only SMS of the last 2 hours are stored, so an old inbox is not imported.
+- Max 10 pages a run. An SMS id is stored once (`storeEvents` skips an `in` row with the same provider id).
+- Delay: the gateway pulls every 60 s, narjes-hesari.ir reads `/inbox` every 20 s → an SMS reaches the site in ≤ ~80 s.
+- Look at the Mihan inbox without changing it (read-only): SOAP `getMessagesByTime(fromTime)`; `accountInfo` shows the
+  receive URL.
+
 ## Low provider-balance alert (since 2026-11-08)
 
 This is the credit of **our account at the SMS provider**, not the balance of an API key.
@@ -199,7 +222,7 @@ module.exports = {
 ```
 
 Included drivers: `generic-http` (text) and `generic-http-template` (template) — connect most simple HTTP SMS APIs
-from the admin panel with URL/body templates, no code; `kavenegar-lookup` (template); `mihan-sms` (MihanSMSCenter, text, SOAP; send, receive by push or pull, balance); `mock-text` and
+from the admin panel with URL/body templates, no code; `kavenegar-lookup` (template); `mihan-sms` (MihanSMSCenter, text, SOAP; send, receive by push or pull (read-only `getMessages` cursor, or `getNewMessages`), balance); `mock-text` and
 `mock-template` (send nothing; for testing). Files starting with `_` in `src/providers/` are shared helpers.
 
 ## Development

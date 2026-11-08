@@ -35,6 +35,11 @@ async function storeEvents(provider, events) {
   let stored = 0;
   for (const ev of events) {
     if (ev.kind === 'sms') {
+      // a pulled SMS can come again (the cursor was not saved after a crash): store it once
+      if (ev.providerMessageId != null && (await q(
+        `SELECT 1 FROM messages WHERE provider_id=$1 AND direction='in' AND provider_message_id=$2 LIMIT 1`,
+        [provider.id, String(ev.providerMessageId)],
+      )).rows.length) continue;
       // 11 / 12 are commands to the gateway (blacklist), not messages for a project: kept in the log
       // (Messages) with no key, so no key's inbox or webhook ever sees them
       const cmd = blacklist.parseCommand(ev.text);
