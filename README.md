@@ -45,7 +45,7 @@ This is the credit of **our account at the SMS provider**, not the balance of an
   While the balance stays low it repeats at most every N hours. When the balance is above the threshold again, the next drop alerts at once.
   If the alert cannot be sent, it is tried again after the next SMS.
 - Settings (admin page **Alerts**, table `settings`): `alert_phone` (default `09031238058`), `alert_threshold` (default `0` = **off**; the unit is the
-  provider's balance unit), `alert_repeat_hours` (default 24). The page also shows the last known balance and last alert per provider.
+  provider's balance unit), `alert_repeat_hours` (default 24). The page also shows the last known balance and last alert per provider, with a refresh button per provider that fetches the balance now (works even when alerts are off).
   State per provider is in `settings` too: `bal_<id>`, `alert_at_<id>`. No migration.
 - The alert is sent straight through the driver: no billing, no blacklist check, no footer, not saved in `messages`.
 - Code: `src/lowbalance.js`, test: `test/lowbalance.test.js`.

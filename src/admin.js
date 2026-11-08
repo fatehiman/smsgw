@@ -586,7 +586,8 @@ route('GET', /^\/mainadmin\/alerts$/, async (ctx) => {
     return `<tr><td class="mono">${esc(p.slug)}</td><td>${can ? badge('can read balance', 'ok') : badge('no balance API', '')}</td>
       <td>${b ? `${fmtMoney(b.amount)}${b.remaining_sms != null ? ` <span class="muted">(${fmtMoney(b.remaining_sms)} SMS)</span>` : ''} ${low ? badge('low', 'bad') : ''}
       <div class="help">checked ${fmtTime(new Date(b.at))} UTC</div>` : '<span class="muted">not checked yet</span>'}</td>
-      <td class="muted">${at ? `${fmtTime(new Date(at))} UTC` : '—'}</td></tr>`;
+      <td class="muted">${at ? `${fmtTime(new Date(at))} UTC` : '—'}</td>
+      <td>${can ? postBtn(`/mainadmin/alerts/${p.id}/refresh`, ctx.s.csrf, 'refresh', 'Fetch the balance now', 'blue') : ''}</td></tr>`;
   }));
   return page(ctx, 'Alerts', `<h1>Low balance alert</h1><form class="card" method="post" action="/mainadmin/alerts">${hidden(ctx)}
     <p class="muted">After every accepted SMS the gateway reads the credit of <b>our account at the provider</b> (in the background).
@@ -597,7 +598,7 @@ route('GET', /^\/mainadmin\/alerts$/, async (ctx) => {
     <div class="help">Alert when the provider balance is below this. 0 = alerts off.</div>
     <label for="alert_repeat_hours">Repeat the alert every (hours)</label><input id="alert_repeat_hours" type="number" min="1" max="720" name="alert_repeat_hours" value="${c.repeatHours}" style="max-width:140px">
     <button class="btn txt-btn" type="submit">Save</button></form>
-    <div class="card"><table><tr><th>Provider</th><th>Support</th><th>Last known balance</th><th>Last alert</th></tr>${rows.join('') || '<tr><td colspan="4" class="muted">No providers.</td></tr>'}</table></div>`, 'alerts');
+    <div class="card"><table><tr><th>Provider</th><th>Support</th><th>Last known balance</th><th>Last alert</th><th></th></tr>${rows.join('') || '<tr><td colspan="5" class="muted">No providers.</td></tr>'}</table></div>`, 'alerts');
 });
 
 route('POST', /^\/mainadmin\/alerts$/, async (ctx) => {

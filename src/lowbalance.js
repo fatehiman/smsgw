@@ -27,6 +27,15 @@ async function lastBalance(providerId) {
 
 const fmt = (n) => Number(n).toLocaleString('en-US');
 
+/** Ask the provider for its balance now and remember it. Throws if the driver cannot or the call fails. */
+async function refresh(provider, driver) {
+  if (typeof driver.balance !== 'function') throw new Error('This provider cannot tell its balance');
+  const b = await driver.balance({ settings: provider.settings, provider });
+  const amount = Number(b.amount);
+  await settings.set(`bal_${provider.id}`, JSON.stringify({ amount, remaining_sms: b.remaining_sms ?? null, at: Date.now() }));
+  return { amount, remaining_sms: b.remaining_sms ?? null };
+}
+
 async function check(provider, driver) {
   if (typeof driver.balance !== 'function' || driver.type !== 'text') return null;
   const cfg = await getConfig();
@@ -35,9 +44,8 @@ async function check(provider, driver) {
   inflight.add(provider.id);
   try {
     const ctx = { settings: provider.settings, provider };
-    const b = await driver.balance(ctx);
-    const amount = Number(b.amount);
-    await settings.set(`bal_${provider.id}`, JSON.stringify({ amount, remaining_sms: b.remaining_sms ?? null, at: Date.now() }));
+    const b = await refresh(provider, driver);
+    const amount = b.amount;
     const s = await settings.all();
     const lastAlert = Number(s[`alert_at_${provider.id}`] || 0);
     if (amount >= cfg.threshold) {
@@ -64,4 +72,4 @@ async function check(provider, driver) {
   }
 }
 
-module.exports = { DEFAULT_PHONE, getConfig, lastBalance, check };
+module.exports = { DEFAULT_PHONE, getConfig, lastBalance, refresh, check };
