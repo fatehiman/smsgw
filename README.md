@@ -61,7 +61,7 @@ Code: `src/outbox.js`, called from `src/sms.js` and started in `src/server.js`.
 - Admin: Dashboard shows "SMS in queue"; Messages shows tries and the next try time.
 - Test a retry with the `mock-text` provider setting "Temporary failure if number contains".
 
-## Receiving SMS from Mihan (read-only pull, since 2026-11-08)
+## Receiving SMS from Mihan (push + read-only pull, since 2026-11-08)
 
 **Incident 2026-11-08.** A client answered a booking SMS of narjes-hesari.ir with «پرداخت کردم», but the site never
 got it. The gateway had **never** received an SMS: the Mihan account's receive URL (push) is
@@ -69,18 +69,29 @@ got it. The gateway had **never** received an SMS: the Mihan account's receive U
 We must not take the receive URL away from that system, and `getNewMessages` marks SMS as read at Mihan, which could
 hide them from it.
 
+(Later the same day: `smsservice.ir/r-kiani` is only Mihan's own default receive URL, not a system of ours. The rule
+now: **the gateway is the only direct receiver of the Mihan account.** The account's receive URL was set to our hook
+with the SOAP call `changeReceiveURL`, see "Push" below.)
+
 So the setting **"Fetch received SMS"** of a `mihan-sms` provider now has three values:
 
 | Value | What |
 |---|---|
 | `no` | no pull; only the receive URL (push) to `/hook/<slug>/<secret>`, if it points to us |
-| `yes` | **read-only pull**: every minute `getMessages(fromId)` with a cursor (`providers.state.lastId`). Marks nothing read at Mihan, so the other system keeps working. **Live value.** |
+| `yes` | **read-only pull**: every minute `getMessages(fromId)` with a cursor (`providers.state.lastId`). Marks nothing read at Mihan. **Live value**, kept on as the safety net for a lost push. |
 | `mark_read` | the old pull: `getNewMessages` every minute (marks them read at Mihan). Only when no other system reads the account. |
 
 - `getMessages(fromId)` returns the SMS with id **greater than** `fromId` (checked on the live account).
 - First run (no cursor): only SMS of the last 2 hours are stored, so an old inbox is not imported.
-- Max 10 pages a run. An SMS id is stored once (`storeEvents` skips an `in` row with the same provider id).
-- Delay: the gateway pulls every 60 s, narjes-hesari.ir reads `/inbox` every 20 s → an SMS reaches the site in ≤ ~80 s.
+- Max 10 pages a run.
+- **Push** (live): Mihan's receive URL = `https://smsgw.kimiasoft.ir/hook/mihan/<inbound secret of the provider>`
+  (the full URL is on the provider's admin page). Mihan POSTs `to, from, message, timestamp`; the driver checks it with
+  `verifyReceive` (a forged POST is dropped). Set it with SOAP `changeReceiveURL(username, password, receive_url)` or in
+  the Mihan panel; check it with `accountInfo`.
+- **Stored once.** Push has no Mihan message id, the pull has one. `storeEvents` → `alreadyStored()`: same provider id →
+  skip; else same sender, same text and provider time (`messages.provider_time`, Unix seconds) within ±90 s → skip (a
+  push row gets the pull's id).
+- Delay: push = at once; if the push is lost, the pull gets it within 60 s. narjes-hesari.ir reads `/inbox` every 20 s.
 - Look at the Mihan inbox without changing it (read-only): SOAP `getMessagesByTime(fromTime)`; `accountInfo` shows the
   receive URL.
 
@@ -153,9 +164,17 @@ hour at the top of the hour, day at 00:00 in the configured time zone (default T
 moment for all tokens. A token can override each limit (empty = global default, 0 = no limit).
 Responses carry `X-RateLimit-*` headers; over the limit → `429` with `Retry-After`.
 
-**Who gets a received SMS?** (1) the token whose *incoming numbers* contain the line it came to,
-(2) else the token that last sent an SMS to that sender through the same provider, (3) else nobody
-(still visible in admin → Messages).
+**Who gets a received SMS?** (since 2026-11-08 one SMS can go to **several** keys)
+(1) the keys whose *incoming numbers* contain the line it came to (a line of its own),
+(2) else **every** key that sent an SMS (not failed) to that sender through the same provider within its **window**:
+the key's "Received SMS window, hours" (`api_tokens.inbound_hours`), empty = the global value (admin → Rate limits →
+Received SMS, setting `inbound_hours`, default **48**). A project only gets the answers of people it wrote to.
+(3) else nobody (still visible in admin → Messages, column Key = "—").
+Every key gets its own copy in its inbox (table `inbox`: `token_id`, `message_id`, `read_at`): read / ack of one key
+never hides the SMS from another key, and every key's `sms.received` webhooks are called. The SMS row is stored once
+(`messages.token_id` = the latest sender, only for the admin list). Admin → Messages shows all keys of a received SMS,
+with "(unread)" per key; the Key filter finds a received SMS by any of its keys. Code: `src/inbound.js` `recipients()`.
+Migration 5 copied the old one-owner rows into `inbox`.
 
 **Webhooks.** `sms.received` and `sms.status`. JSON POST, header `X-SMSGW-Signature: sha256=<hmac>` over
 `<X-SMSGW-Timestamp>.<body>` with the webhook secret. Retries after 10 s, 1 min, 5 min, 30 min, 2 h. Webhook URLs

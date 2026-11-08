@@ -342,7 +342,9 @@ async function tokenForm(ctx, t, allProviders, linked) {
     <label for="dp">Default provider for this key</label><select id="dp" name="default_provider_id">${opts}</select>
     <div class="help">Automatic = the global default provider if this key may use it, otherwise the first provider ticked above.</div>
     <label for="inn">Incoming numbers (optional)</label><input id="inn" type="text" name="inbound_numbers" value="${esc((t.inbound_numbers || []).join(', '))}" placeholder="e.g. 3000123, 0912...">
-    <div class="help">SMS received on these line numbers go to this key. Other replies go to the key that last sent to that sender.</div>
+    <div class="help">SMS received on these line numbers go to this key (a line of its own). Other received SMS go to <b>every</b> key that sent an SMS to that number within its window (below).</div>
+    <label for="ih">Received SMS window, hours (optional)</label><input id="ih" type="number" min="1" max="8760" name="inbound_hours" value="${t.inbound_hours ?? ''}" placeholder="default" style="max-width:130px">
+    <div class="help">This key gets an SMS from a number only when it sent an SMS to that number in the last N hours. Empty = the global value (page Rate limits, default 48).</div>
     <label>Rate limits for this key, per caller IP (empty = global default, 0 = no limit)</label>
     <div style="display:flex;gap:12px;flex-wrap:wrap">${lim('minute', 'Per minute')}${lim('hour', 'Per hour')}${lim('day', 'Per day')}</div>`;
 }
@@ -381,6 +383,13 @@ route('GET', /^\/mainadmin\/tokens\/new$/, async (ctx) => {
     ${await tokenForm(ctx, {}, all, new Map(all.map((p) => [p.id, null])))}<button class="btn txt-btn" type="submit">Create</button></form>`, 'tokens');
 });
 
+function hoursOrNull(v) {
+  if (v === undefined || v === null || String(v).trim() === '') return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 8760) throw new ApiError(422, 'invalid', 'Received SMS window must be 1-8760 hours');
+  return n;
+}
+
 async function readTokenForm(body) {
   const name = String(body.name || '').trim();
   if (!name || name.length > 100) throw new ApiError(422, 'invalid', 'Name is required (max 100 characters)');
@@ -404,6 +413,7 @@ async function readTokenForm(body) {
     lm: intOrNull(body.limit_minute),
     lh: intOrNull(body.limit_hour),
     ld: intOrNull(body.limit_day),
+    ih: hoursOrNull(body.inbound_hours),
   };
 }
 
@@ -425,9 +435,9 @@ route('POST', /^\/mainadmin\/tokens$/, async (ctx) => {
   const token = randomToken();
   const id = await tx(async (c) => {
     const r = await c.query(
-      `INSERT INTO api_tokens (name, token_hash, token_prefix, default_provider_id, inbound_numbers, limit_minute, limit_hour, limit_day, credit_limit)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-      [f.name, sha256(token), token.slice(0, 8), f.defaultId, f.numbers, f.lm, f.lh, f.ld, f.creditLimit],
+      `INSERT INTO api_tokens (name, token_hash, token_prefix, default_provider_id, inbound_numbers, limit_minute, limit_hour, limit_day, credit_limit, inbound_hours)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+      [f.name, sha256(token), token.slice(0, 8), f.defaultId, f.numbers, f.lm, f.lh, f.ld, f.creditLimit, f.ih],
     );
     await saveLinks(c, r.rows[0].id, f.providerIds, f.prices);
     return r.rows[0].id;
@@ -489,8 +499,8 @@ route('POST', /^\/mainadmin\/tokens\/(\d+)$/, async (ctx) => {
   const f = await readTokenForm(ctx.body);
   await tx(async (c) => {
     await c.query(
-      `UPDATE api_tokens SET name=$2, default_provider_id=$3, inbound_numbers=$4, limit_minute=$5, limit_hour=$6, limit_day=$7, credit_limit=$8 WHERE id=$1`,
-      [t.id, f.name, f.defaultId, f.numbers, f.lm, f.lh, f.ld, f.creditLimit],
+      `UPDATE api_tokens SET name=$2, default_provider_id=$3, inbound_numbers=$4, limit_minute=$5, limit_hour=$6, limit_day=$7, credit_limit=$8, inbound_hours=$9 WHERE id=$1`,
+      [t.id, f.name, f.defaultId, f.numbers, f.lm, f.lh, f.ld, f.creditLimit, f.ih],
     );
     await saveLinks(c, t.id, f.providerIds, f.prices);
   });
@@ -559,6 +569,8 @@ route('GET', /^\/mainadmin\/limits$/, async (ctx) => {
     ${field('limit_hour', 'Per hour', l.hour, 'Max requests per IP per hour')}
     ${field('limit_day', 'Per day', l.day, 'Max requests per IP per day')}
     ${field('tz_offset_min', 'Time zone offset, minutes from UTC', l.tzOffsetMin, '210 = Tehran (UTC+3:30). Decides when "00:00" is.')}
+    <h2>Received SMS</h2>
+    ${field('inbound_hours', 'Window, hours', Number((await settings.all()).inbound_hours) || 48, 'A received SMS goes to every key that sent an SMS to that number in the last N hours (a key can have its own value). Default 48.')}
     <button class="btn txt-btn" type="submit">Save</button></form>`, 'limits');
 });
 
@@ -570,8 +582,10 @@ route('POST', /^\/mainadmin\/limits$/, async (ctx) => {
   }
   const tz = Number(ctx.body.tz_offset_min);
   if (!Number.isInteger(tz) || tz < -720 || tz > 840) throw new ApiError(422, 'invalid', 'Time zone offset must be between -720 and 840 minutes');
+  const ih = hoursOrNull(ctx.body.inbound_hours); // empty / missing = keep the current value
   for (const [k, v] of Object.entries(vals)) await settings.set(k, v);
   await settings.set('tz_offset_min', tz);
+  if (ih !== null) await settings.set('inbound_hours', ih);
   return back('/mainadmin/limits', 'Saved', null);
 });
 
@@ -630,7 +644,9 @@ route('POST', /^\/mainadmin\/alerts$/, async (ctx) => {
 
 // --- messages
 function messageSql(where, limit) {
-  return `SELECT m.*, p.slug AS provider_slug, t.name AS token_name FROM messages m
+  return `SELECT m.*, p.slug AS provider_slug, t.name AS token_name,
+    (SELECT string_agg(t2.name || CASE WHEN i.read_at IS NULL THEN ' (unread)' ELSE '' END, ', ' ORDER BY t2.name)
+       FROM inbox i JOIN api_tokens t2 ON t2.id = i.token_id WHERE i.message_id = m.id) AS inbox_keys FROM messages m
     LEFT JOIN providers p ON p.id=m.provider_id LEFT JOIN api_tokens t ON t.id=m.token_id ${where} ORDER BY m.id DESC LIMIT ${limit}`;
 }
 
@@ -639,7 +655,7 @@ function messageTable(rows) {
   const tries = (m) => (m.direction === 'out' && m.attempts > 1 ? `<div class="help">tries: ${m.attempts}</div>` : '')
     + (m.status === 'queued' && m.next_at && m.attempts > 0 ? `<div class="help">next try ${fmtTime(m.next_at)}</div>` : '');
   const trs = rows.map((m) => `<tr><td class="muted">${m.id}</td><td class="muted">${fmtTime(m.created_at)}</td>
-    <td>${m.direction === 'out' ? '→' : '←'}</td><td class="mono">${esc(m.peer)}</td><td>${esc(m.token_name || '—')}</td><td class="mono">${esc(m.provider_slug || '—')}</td>
+    <td>${m.direction === 'out' ? '→' : '←'}</td><td class="mono">${esc(m.peer)}</td><td>${esc((m.direction === 'in' ? m.inbox_keys : m.token_name) || '—')}</td><td class="mono">${esc(m.provider_slug || '—')}</td>
     <td>${esc(m.body ?? (m.template_code ? `[${m.template_code}] ${JSON.stringify(m.params)}` : ''))}</td>
     <td>${badge(m.status, st[m.status] || '')}${m.error ? `<div class="help">${esc(m.error)}</div>` : ''}${tries(m)}</td>
     <td class="mono muted">${m.parts ?? ''}${m.cost != null ? ` · ${fmtMoney(m.cost)}` : ''}</td></tr>`).join('');
@@ -651,7 +667,10 @@ route('GET', /^\/mainadmin\/messages$/, async (ctx) => {
   const where = [];
   const args = [];
   if (['in', 'out'].includes(sp.get('dir'))) { args.push(sp.get('dir')); where.push(`m.direction=$${args.length}`); }
-  if (sp.get('token')) { args.push(Number(sp.get('token')) || 0); where.push(`m.token_id=$${args.length}`); }
+  if (sp.get('token')) {
+    args.push(Number(sp.get('token')) || 0);
+    where.push(`(m.token_id=$${args.length} OR EXISTS (SELECT 1 FROM inbox i WHERE i.message_id=m.id AND i.token_id=$${args.length}))`);
+  }
   if (sp.get('status')) { args.push(sp.get('status')); where.push(`m.status=$${args.length}`); }
   if (sp.get('before')) { args.push(Number(sp.get('before')) || 0); where.push(`m.id<$${args.length}`); }
   const rows = (await q(messageSql(where.length ? `WHERE ${where.join(' AND ')}` : '', 100), args)).rows;

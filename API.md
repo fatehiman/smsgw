@@ -175,4 +175,6 @@ For safer processing use `GET /inbox?unread=1`, handle them, then `POST /inbox/a
 Or keep your own cursor with `after_id`.
 
 An incoming SMS is given to your key if it arrived on one of your key's *incoming numbers*
-(admin setting), or if you last sent an SMS to that sender.
+(admin setting), or if your key sent an SMS to that sender within its window (default 48 hours; the admin can change
+it per key). Other keys that also wrote to that sender get the same SMS too. Read / ack is per key: what you ack is
+still unread for another key.

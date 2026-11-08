@@ -79,7 +79,7 @@ async function pollReadOnly(ctx) {
     list.sort((a, b) => Number(a.messageId) - Number(b.messageId));
     for (const m of list) {
       if (!first || Number(m.timestamp) >= minTime) {
-        events.push({ kind: 'sms', from: m.from, to: m.to, text: m.message, providerMessageId: m.messageId });
+        events.push({ kind: 'sms', from: m.from, to: m.to, text: m.message, providerMessageId: m.messageId, time: Number(m.timestamp) });
       }
     }
     lastId = Number(list[list.length - 1].messageId);
@@ -103,8 +103,9 @@ module.exports = {
     { key: 'sender', label: 'Sender number', required: true, help: 'One of the numbers of the account, e.g. 3000250005.' },
     { key: 'convert_to', label: 'Convert numbers to 09xxxxxxxxx', type: 'select', options: ['yes', 'no'], default: 'yes', help: '+98912..., 98912... and 912... become 0912...' },
     { key: 'poll_inbound', label: 'Fetch received SMS (every minute)', type: 'select', options: ['no', 'yes', 'mark_read'], default: 'no',
-      help: 'yes = read-only (getMessages with a cursor; safe when the receive URL is used by another system). '
-        + 'mark_read = getNewMessages (marks them read at Mihan). no = only the receive URL (push) to /hook.' },
+      help: 'yes = read-only (getMessages with a cursor). Keep it on also when the receive URL points to /hook: it is the '
+        + 'safety net for a lost push (an SMS is stored once). mark_read = getNewMessages (marks them read at Mihan). '
+        + 'no = only the push.' },
     { key: 'endpoint', label: 'Endpoint (leave empty)', default: '', help: `Default ${NS}index.php` },
   ],
 
@@ -138,16 +139,16 @@ module.exports = {
       const b = { ...req.query, ...(typeof req.body === 'object' && req.body ? req.body : {}) };
       if (!b.from || b.message == null) return [];
       const v = await call(ctx.settings, 'verifyReceive', {
-        to: String(b.to ?? ''), from: String(b.from), message: String(b.message), timestamp: String(b.timestamp ?? ''),
+        to: String(b.to ?? ''), from: String(b.from), message: String(b.message), timestamp: Number(b.timestamp) || 0,
       });
       if (v.status !== 0) return [];
-      return [{ kind: 'sms', from: String(b.from), to: b.to ?? null, text: String(b.message), providerMessageId: null }];
+      return [{ kind: 'sms', from: String(b.from), to: b.to ?? null, text: String(b.message), providerMessageId: null, time: Number(b.timestamp) }];
     },
 
     async poll(ctx) {
       const mode = ctx.settings.poll_inbound;
       const toEvents = (list) => list.map((m) => ({
-        kind: 'sms', from: m.from, to: m.to, text: m.message, providerMessageId: m.messageId,
+        kind: 'sms', from: m.from, to: m.to, text: m.message, providerMessageId: m.messageId, time: Number(m.timestamp),
       }));
       if (mode === 'mark_read') {
         const r = await call(ctx.settings, 'getNewMessages', {});

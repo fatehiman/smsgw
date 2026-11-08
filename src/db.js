@@ -175,6 +175,24 @@ const MIGRATIONS = [
   `ALTER TABLE messages ADD COLUMN attempts int NOT NULL DEFAULT 0, ADD COLUMN next_at timestamptz;
    UPDATE messages SET next_at = created_at WHERE direction='out' AND status IN ('queued','sending');
    CREATE INDEX messages_outbox_idx ON messages (next_at, id) WHERE status = 'queued';`,
+  // 5: a received SMS can belong to SEVERAL keys (src/inbound.js recipients()): one inbox row per key, each with its
+  //    own read state. api_tokens.inbound_hours = this key's window (NULL = the global setting inbound_hours, 48).
+  //    messages.provider_time = the provider's own time of a received SMS (push and pull of the same SMS: stored once).
+  //    The old one-owner rows become inbox rows of their owner.
+  `CREATE TABLE inbox (
+     token_id int NOT NULL REFERENCES api_tokens(id) ON DELETE CASCADE,
+     message_id bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+     read_at timestamptz,
+     created_at timestamptz NOT NULL DEFAULT now(),
+     PRIMARY KEY (token_id, message_id)
+   );
+   CREATE INDEX inbox_message_idx ON inbox (message_id);
+   CREATE INDEX inbox_unread_idx ON inbox (token_id, message_id) WHERE read_at IS NULL;
+   ALTER TABLE api_tokens ADD COLUMN inbound_hours int CHECK (inbound_hours BETWEEN 1 AND 8760);
+   ALTER TABLE messages ADD COLUMN provider_time bigint;
+   INSERT INTO inbox (token_id, message_id, read_at, created_at)
+     SELECT token_id, id, read_at, created_at FROM messages WHERE direction = 'in' AND token_id IS NOT NULL;
+   INSERT INTO settings (key, value) VALUES ('inbound_hours', '48') ON CONFLICT (key) DO NOTHING;`,
 ];
 
 async function migrate() {

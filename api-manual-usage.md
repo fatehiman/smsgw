@@ -185,7 +185,8 @@ curl -s -X POST $BASE/inbox/ack -H "Authorization: Bearer $TOKEN" \
 You can also keep your own cursor: `GET /inbox?after_id=8&limit=50`.
 
 **Which SMS are mine?** An incoming SMS goes to your key if it came to one of your key's *incoming numbers*
-(admin setting), or if your key was the last one to send an SMS to that sender.
+(admin setting), or if your key sent an SMS to that sender in the last 48 hours (the admin can change the hours per
+key). If two projects wrote to the same person, **both** get the answer; each one reads and acks its own copy.
 
 ## 7. Rate limits
 

@@ -160,14 +160,14 @@ async function waitDone(token, id, ms = 25000) {
   let hr = await fetch(BASE + hook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: '09129999999', to: '3000111', text: 'hello back', id: 'in-1' }) });
   assert.equal(hr.status, 200);
   r = await api(token, 'GET', '/api/v1/inbox?unread=1&ack=1');
-  assert.equal(r.json.messages.length, 1);
+  assert.equal(r.json.messages?.length, 1, JSON.stringify(r.json));
   assert.equal(r.json.messages[0].text, 'hello back');
   r = await api(token, 'GET', '/api/v1/inbox?unread=1');
   assert.equal(r.json.messages.length, 0);
   // reply to a number we sent to -> goes to the same token even without the line number
   await fetch(BASE + hook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: '+98 912 000 0002', text: 'reply' }) });
   r = await api(token, 'GET', '/api/v1/inbox?unread=1');
-  assert.equal(r.json.messages.length, 1);
+  assert.equal(r.json.messages?.length, 1, JSON.stringify(r.json));
   for (let i = 0; i < 20 && got.length < 2; i++) await new Promise((x) => setTimeout(x, 500));
   assert.equal(got.length, 2, 'webhook deliveries');
   assert.equal(got[0].body.event, 'sms.received');
@@ -175,6 +175,36 @@ async function waitDone(token, id, ms = 25000) {
   const sig = crypto.createHmac('sha256', secret).update(`${got[0].headers['x-smsgw-timestamp']}.${JSON.stringify(got[0].body)}`).digest('hex');
   assert.equal(got[0].headers['x-smsgw-signature'], `sha256=${sig}`);
   recv.close();
+
+  step('received SMS go to EVERY key that wrote to the number (per-key read state)');
+  const mkKey = async (name) => {
+    const k = await admin('POST', '/mainadmin/tokens', { name, providers: [txtId], default_provider_id: txtId });
+    return /id="tk">([^<]+)</.exec(k.text)[1];
+  };
+  const keyB = await mkKey('Second');
+  const keyC = await mkKey('Never wrote');
+  for (const k of [token, keyB]) {
+    r = await api(k, 'POST', '/api/v1/sms/send', { to: '09120000005', text: 'question' });
+    assert.equal((await waitDone(k, r.json.message.id)).status, 'sent');
+  }
+  await api(token, 'GET', '/api/v1/inbox?unread=1&ack=1'); // empty the first key's inbox
+  hr = await fetch(BASE + hook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: '+989120000005', text: 'answer', id: 'in-5' }) });
+  assert.equal(hr.status, 200);
+  // the same SMS again (push + pull, same provider id): stored once
+  await fetch(BASE + hook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: '+989120000005', text: 'answer', id: 'in-5' }) });
+  r = await api(token, 'GET', '/api/v1/inbox?unread=1&ack=1');
+  assert.deepEqual(r.json.messages.map((m) => m.text), ['answer'], 'first key');
+  r = await api(keyB, 'GET', '/api/v1/inbox?unread=1');
+  assert.deepEqual(r.json.messages.map((m) => [m.text, m.read]), [['answer', false]], 'second key: still unread there');
+  r = await api(keyC, 'GET', '/api/v1/inbox');
+  assert.equal(r.json.messages.length, 0, 'a key that never wrote to the number gets nothing');
+  r = await api(keyB, 'POST', '/api/v1/inbox/ack', { up_to_id: r.json.messages[0]?.id ?? 1e9 });
+  r = await api(keyB, 'GET', '/api/v1/inbox?unread=1');
+  assert.equal(r.json.messages.length, 0);
+  r = await admin('GET', '/mainadmin/messages?dir=in');
+  assert.ok(r.text.includes('Second') && r.text.includes('Smoke'), 'admin shows both keys');
+  r = await admin('GET', '/mainadmin/limits');
+  assert.ok(r.text.includes('name="inbound_hours"'));
 
   step('webhook URL rules');
   r = await api(token, 'POST', '/api/v1/webhooks', { url: 'ftp://x.com' });
@@ -273,4 +303,4 @@ async function waitDone(token, id, ms = 25000) {
 
   console.log('ALL OK');
   process.exit(0);
-})().catch((e) => { console.error('FAILED:', e.message); process.exit(1); });
+})().catch((e) => { console.error('FAILED:', e.stack); process.exit(1); });

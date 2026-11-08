@@ -163,17 +163,18 @@ const routes = [
     return { message: m };
   }],
 
-  // Fetch received SMS. unread=1: only new ones. ack=1: mark what is returned as read.
+  // Fetch received SMS of THIS key (src/inbound.js recipients(): every key that wrote to the sender within its
+  // window gets the SMS; read / ack is per key). unread=1: only new ones. ack=1: mark what is returned as read.
   ['GET', /^\/api\/v1\/inbox$/, async ({ token, query }) => {
     const limit = clampInt(query.limit, 50, 1, 200);
     const after = clampInt(query.after_id, 0, 0, Number.MAX_SAFE_INTEGER);
-    const unread = ['1', 'true'].includes(String(query.unread)) ? 'AND m.read_at IS NULL' : '';
+    const unread = ['1', 'true'].includes(String(query.unread)) ? 'AND i.read_at IS NULL' : '';
     const rows = (await q(
-      `${sms.SELECT} WHERE m.token_id=$1 AND m.direction='in' AND m.id > $2 ${unread} ORDER BY m.id ASC LIMIT $3`,
+      `${sms.INBOX_SELECT} WHERE i.token_id=$1 AND i.message_id > $2 ${unread} ORDER BY i.message_id ASC LIMIT $3`,
       [token.id, after, limit],
     )).rows;
     if (['1', 'true'].includes(String(query.ack)) && rows.length) {
-      await q('UPDATE messages SET read_at = now() WHERE token_id=$1 AND id = ANY($2::bigint[]) AND read_at IS NULL', [token.id, rows.map((r) => r.id)]);
+      await q('UPDATE inbox SET read_at = now() WHERE token_id=$1 AND message_id = ANY($2::bigint[]) AND read_at IS NULL', [token.id, rows.map((r) => r.id)]);
     }
     return { messages: rows.map(sms.present) };
   }],
@@ -181,9 +182,9 @@ const routes = [
   ['POST', /^\/api\/v1\/inbox\/ack$/, async ({ token, body }) => {
     let r;
     if (Number.isInteger(body.up_to_id)) {
-      r = await q(`UPDATE messages SET read_at=now() WHERE token_id=$1 AND direction='in' AND id <= $2 AND read_at IS NULL`, [token.id, body.up_to_id]);
+      r = await q(`UPDATE inbox SET read_at=now() WHERE token_id=$1 AND message_id <= $2 AND read_at IS NULL`, [token.id, body.up_to_id]);
     } else if (Array.isArray(body.ids) && body.ids.every(Number.isInteger)) {
-      r = await q(`UPDATE messages SET read_at=now() WHERE token_id=$1 AND direction='in' AND id = ANY($2::bigint[]) AND read_at IS NULL`, [token.id, body.ids]);
+      r = await q(`UPDATE inbox SET read_at=now() WHERE token_id=$1 AND message_id = ANY($2::bigint[]) AND read_at IS NULL`, [token.id, body.ids]);
     } else {
       throw new ApiError(422, 'invalid_body', 'Send {"ids":[1,2]} or {"up_to_id":10}');
     }

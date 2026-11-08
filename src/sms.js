@@ -176,7 +176,8 @@ function present(r) {
     } : {}),
     created_at: r.created_at,
     updated_at: r.updated_at,
-    ...(r.direction === 'in' ? { read: r.read_at != null } : {}),
+    // a received SMS is read or not PER KEY (inbox.read_at), see getInboxMessage()
+    ...(r.direction === 'in' ? { read: (r.inbox_read_at !== undefined ? r.inbox_read_at : r.read_at) != null } : {}),
   };
 }
 
@@ -187,4 +188,13 @@ async function getMessage(tokenId, id) {
   return r ? present(r) : null;
 }
 
-module.exports = { sendSms, getMessage, present, SELECT, allowedProviders, effectiveDefault, pickProvider, buildMessage };
+// A received SMS as one key sees it (only when it is in that key's inbox).
+const INBOX_SELECT = `SELECT m.*, p.slug AS provider_slug, i.read_at AS inbox_read_at FROM inbox i
+  JOIN messages m ON m.id = i.message_id LEFT JOIN providers p ON p.id = m.provider_id`;
+
+async function getInboxMessage(tokenId, id) {
+  const r = (await q(`${INBOX_SELECT} WHERE i.token_id=$1 AND i.message_id=$2`, [tokenId, id])).rows[0];
+  return r ? present(r) : null;
+}
+
+module.exports = { sendSms, getMessage, getInboxMessage, INBOX_SELECT, present, SELECT, allowedProviders, effectiveDefault, pickProvider, buildMessage };
