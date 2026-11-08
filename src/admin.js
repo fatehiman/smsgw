@@ -601,6 +601,18 @@ route('GET', /^\/mainadmin\/alerts$/, async (ctx) => {
     <div class="card"><table><tr><th>Provider</th><th>Support</th><th>Last known balance</th><th>Last alert</th><th></th></tr>${rows.join('') || '<tr><td colspan="5" class="muted">No providers.</td></tr>'}</table></div>`, 'alerts');
 });
 
+route('POST', /^\/mainadmin\/alerts\/(\d+)\/refresh$/, async (ctx) => {
+  const p = (await q('SELECT * FROM providers WHERE id=$1', [Number(ctx.params[0])])).rows[0];
+  if (!p) throw new ApiError(404, 'not_found', 'Provider not found');
+  try {
+    const b = await lowbalance.refresh(p, providers.get(p.driver) || {});
+    const sms = b.remaining_sms != null ? ` (${fmtMoney(b.remaining_sms)} SMS)` : '';
+    return back('/mainadmin/alerts', `${p.slug}: balance is ${fmtMoney(b.amount)}${sms}`, null);
+  } catch (e) {
+    return back('/mainadmin/alerts', null, `${p.slug}: ${e.message}`);
+  }
+});
+
 route('POST', /^\/mainadmin\/alerts$/, async (ctx) => {
   const phone = String(ctx.body.alert_phone || '').replace(/[\s-]/g, '');
   if (!/^\+?\d{5,20}$/.test(phone)) throw new ApiError(422, 'invalid', 'Alert phone must be 5-20 digits');
